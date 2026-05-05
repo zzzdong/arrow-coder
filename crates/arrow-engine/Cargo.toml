@@ -1,0 +1,65 @@
+[package]
+name = "arrow-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Engine library for Arrow Coder"
+
+[dependencies]
+arrow-core = { workspace = true }
+arrow-llm = { workspace = true }
+arrow-tools = { workspace = true }
+arrow-knowledge = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Configuration
+toml = "0.8"
+directories = "6.0.0"
+
+# Time
+chrono = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# Hashing
+sha2 = "0.10"
+
+# Home directory
+ dirs = "6.0"
+
+# Tree-sitter for code parsing
+tree-sitter = "0.26.8"
+tree-sitter-rust = "0.24.2"
+
+# Diff generation
+similar = "2.4"
+
+# Regex for entity extraction
+regex = "1.11"
+tree-sitter-python = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-c = "0.24.2"
+
+# Database
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }

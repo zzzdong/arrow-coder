@@ -1,0 +1,59 @@
+[workspace]
+members = [
+    "crates/arrow-core",
+    "crates/arrow-llm",
+    "crates/arrow-tools",
+    "crates/arrow-knowledge",
+    "crates/arrow-engine",
+    "crates/arrow-cli",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Arrow Coder Team"]
+license = "MIT"
+repository = "https://github.com/zzzdong/arrow-coder"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP client
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+# HTTP server
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.6", default-features = false, features = ["cors"] }
+
+# CLI
+clap = { version = "4.6", features = ["derive", "env"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Internal crates
+arrow-core = { path = "crates/arrow-core" }
+arrow-llm = { path = "crates/arrow-llm" }
+arrow-tools = { path = "crates/arrow-tools" }
+arrow-knowledge = { path = "crates/arrow-knowledge" }
+arrow-engine = { path = "crates/arrow-engine" }
+arrow-cli = { path = "crates/arrow-cli" }
