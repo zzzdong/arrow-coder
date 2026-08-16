@@ -1,0 +1,19 @@
+.vscode/**
+src/**
+node_modules/**
+tsconfig.json
+tsconfig.node.json
+vite.config.ts
+.vscode-test/**
+**/*.ts
+**/*.map
+**/*.tsbuildinfo
+
+# Dev-only scripts and metadata (the binary is already copied into bin/ by
+# vscode:prepublish, so we don't need the copy script itself in the package).
+scripts/**
+docs/**
+*.md
+.github/**
+
+# Keep: out/ (compiled JS), bin/ (bundled host binary), package.json, README

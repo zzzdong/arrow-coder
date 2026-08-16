@@ -1,0 +1,145 @@
+
+{
+  "name": "arrow-coder-vscode",
+  "displayName": "Arrow Coder",
+  "description": "VS Code extension that drives the arrow-coder agent (deepseek-harness style) over a stdio JSON-RPC host",
+  "version": "0.1.0",
+  "publisher": "arrow-coder",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "main": "./out/extension.js",
+  "files": [
+    "out/**",
+    "bin/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "arrowCoder",
+          "title": "Arrow Coder",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "arrowCoder": [
+        {
+          "type": "webview",
+          "id": "arrowCoder.chatView",
+          "name": "Arrow Coder",
+          "retainContextWhenHidden": true
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "arrowCoder.newSession",
+        "title": "New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "arrowCoder.toggleHistory",
+        "title": "Session History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "arrowCoder.addToChat",
+        "title": "Add to Arrow Coder Chat",
+        "icon": "$(comment)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "arrowCoder.newSession",
+          "when": "view == arrowCoder.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "arrowCoder.toggleHistory",
+          "when": "view == arrowCoder.chatView",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "arrowCoder.addToChat",
+          "when": "editorTextFocus",
+          "group": "9_cutcopypaste@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "arrowCoder.addToChat",
+          "when": "explorerResourceIsFolder || resourceLangId",
+          "group": "9_cutcopypaste@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Arrow Coder",
+      "properties": {
+        "arrowCoder.server.path": {
+          "type": "string",
+          "default": "arrow-coder-vscode",
+          "description": "Path or command name of the arrow-coder-vscode host binary (the Rust workspace crate). Resolution order: (1) this setting — an absolute/relative file, or a directory containing the binary; (2) the bundled binary inside the extension at `bin/<platform>-<arch>/` (e.g. `bin/win32-x64/`), falling back to `bin/` and `bin/<platform>/`; (3) the bare command name resolved via PATH. Leave default to use the bundled build."
+        },
+        "arrowCoder.server.autoApprove": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve tool calls without prompting (matches config.bypass_tool_permissions)."
+        },
+        "arrowCoder.server.agent": {
+          "type": "string",
+          "default": "default",
+          "description": "Agent profile to load on session start."
+        },
+        "arrowCoder.server.resumeSession": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Session ID to resume on start (from ~/.arrowcode/sessions). Empty/null starts a fresh session."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "vscode:prepublish": "node scripts/copy-host.js && npm run compile",
+    "compile": "tsc -p ./ && vite build",
+    "watch": "tsc -watch -p ./ & vite build --watch",
+    "vite:dev": "vite",
+    "build:host": "cargo build -p arrow-coder-vscode --manifest-path ../Cargo.toml && node scripts/copy-host.js",
+    "package": "vsce package --target ${VSCODE_TARGET:-win32-x64}",
+    "package:win32-x64": "vsce package --target win32-x64",
+    "package:darwin-arm64": "vsce package --target darwin-arm64",
+    "package:linux-x64": "vsce package --target linux-x64"
+  },
+  "dependencies": {
+    "@vscode-elements/elements": "^1.12.0",
+    "highlight.js": "^11.12.0",
+    "markdown-it": "^14.3.0",
+    "pinia": "^2.2.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}

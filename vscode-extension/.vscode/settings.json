@@ -1,0 +1,17 @@
+{
+  // Host binary resolution (leave default to use the standard tiered lookup):
+  //   1. this setting (absolute/relative file or a directory)
+  //   2. bundled binary in ./bin (populated by `npm run package`)
+  //   3. PATH — during dev, run "cargo: install host" (cargo install --path)
+  //      so ~/.cargo/bin/arrow-coder-vscode is the latest protocol build.
+  "arrowCoder.server.path": "arrow-coder-vscode",
+
+  // Recommended: surface the host's stdout/stderr + the agent loop's trace.
+  "arrowCoder.trace": true,
+
+  // ts / vscode defaults
+  "typescript.tsc.autoDetect": "off",
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  }
+}

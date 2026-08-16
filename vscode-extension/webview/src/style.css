@@ -1,0 +1,58 @@
+/* highlight.js token colors — a lightweight VS Code "dark+" inspired theme.
+   These are global because the markdown HTML is injected via v-html and its
+   child token spans are not reachable by scoped styles of MessageItem. */
+.hljs {
+  color: var(--vscode-editor-foreground, #d4d4d4);
+  background: transparent;
+}
+.hljs-comment,
+.hljs-quote {
+  color: #6a9955;
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name,
+.hljs-tag {
+  color: #569cd6;
+}
+.hljs-string,
+.hljs-title,
+.hljs-section,
+.hljs-attribute,
+.hljs-literal,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-addition {
+  color: #ce9178;
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-meta,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #b5cea8;
+}
+.hljs-title.function_,
+.hljs-function .hljs-title {
+  color: #dcdcaa;
+}
+.hljs-attr,
+.hljs-variable,
+.hljs-property,
+.hljs-params {
+  color: #9cdcfe;
+}
+.hljs-deletion {
+  color: #f44747;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}

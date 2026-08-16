@@ -1,59 +1,46 @@
 [workspace]
+resolver = "2"
 members = [
-    "crates/arrow-core",
-    "crates/arrow-llm",
-    "crates/arrow-tools",
-    "crates/arrow-knowledge",
-    "crates/arrow-engine",
-    "crates/arrow-cli",
+    "crates/arrow-coder-core",
+    "crates/arrow-coder-cli",
+    "crates/arrow-coder-vscode",
 ]
-resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
 edition = "2024"
-authors = ["Arrow Coder Team"]
-license = "MIT"
-repository = "https://github.com/zzzdong/arrow-coder"
+version = "0.1.0"
 
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
+anyhow = "1"
 async-trait = "0.1"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# HTTP client
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-
-# HTTP server
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-tower = { version = "0.5", default-features = false }
-tower-http = { version = "0.6", default-features = false, features = ["cors"] }
-
-# CLI
-clap = { version = "4.6", features = ["derive", "env"] }
-
-# Error handling
-thiserror = "1.0"
-anyhow = "1.0"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = "0.3"
-
-# Time
+async-stream = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
-
-# UUID
-uuid = { version = "1.0", features = ["v4", "serde"] }
-
-# Internal crates
-arrow-core = { path = "crates/arrow-core" }
-arrow-llm = { path = "crates/arrow-llm" }
-arrow-tools = { path = "crates/arrow-tools" }
-arrow-knowledge = { path = "crates/arrow-knowledge" }
-arrow-engine = { path = "crates/arrow-engine" }
-arrow-cli = { path = "crates/arrow-cli" }
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+dirs = "6"
+hex = "0.4"
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
+futures = "0.3"
+glob = "0.3"
+grep = "0.4"
+lazy_static = "1"
+rand = "0.10"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.11"
+termcolor = "1"
+crossterm = { version = "0.29", features = ["event-stream"] }
+reqwest = { version = "0.13", features = ["json", "rustls", "stream"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "time", "sync", "io-util", "net", "signal"] }
+tracing = "0.1"
+urlencoding = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.1"
+toml = "1.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"
+which = { version = "8", default-features = false }

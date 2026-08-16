@@ -1,0 +1,202 @@
+<script setup lang="ts">
+// Collapsible reasoning panel for a `think` message.
+// The parent passes `open` (currently expanded) and `userExpanded` (whether the
+// user explicitly opened it). When the user toggles it we record that intent in
+// `userExpanded` so the store will NOT auto-collapse it on turn completion.
+import { computed } from 'vue';
+import { renderMarkdown, ensureClosedFences } from '../markdown';
+
+const props = defineProps<{
+  text: string;
+  open: boolean;
+  userExpanded: boolean;
+}>();
+const emit = defineEmits<{
+  'update:open': [boolean];
+  'update:userExpanded': [boolean];
+}>();
+
+// Render the reasoning prose as markdown (code fences, lists, tables, emphasis
+// all work). `renderMarkdown` keeps `html: false`, so model content cannot
+// inject executable markup. The `computed` re-renders on every streamed update,
+// so live streaming thinking is supported.
+const thinkHtml = computed(() =>
+  props.text ? renderMarkdown(ensureClosedFences(props.text)) : '',
+);
+
+function onToggle(e: Event) {
+  const details = e.target as HTMLDetailsElement;
+  emit('update:open', details.open);
+  // Any user interaction marks the block as explicitly user-controlled, so the
+  // auto-collapse on `done` respects their choice (even if they collapse it).
+  emit('update:userExpanded', true);
+}
+
+// Event delegation for the per-code-block copy buttons rendered by markdown.
+function onBodyClick(e: MouseEvent) {
+  const target = e.target as HTMLElement | null;
+  if (!target) return;
+  const btn = target.closest<HTMLButtonElement>('.code-copy');
+  if (!btn) return;
+  const code = btn.getAttribute('data-code') || '';
+  const decoded = code
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+  navigator.clipboard?.writeText(decoded).then(
+    () => {
+      const old = btn.textContent;
+      btn.textContent = 'Copied';
+      btn.disabled = true;
+      setTimeout(() => {
+        btn.textContent = old;
+        btn.disabled = false;
+      }, 1200);
+    },
+    () => {
+      btn.textContent = 'Failed';
+      setTimeout(() => (btn.textContent = 'Copy'), 1200);
+    },
+  );
+}
+</script>
+
+<template>
+  <details class="thinking-block" :open="props.open" @toggle="onToggle">
+    <summary class="think-head">
+      <span class="think-icon">💭</span>
+      <span>{{ props.text ? '思考过程' : '思考中…' }}</span>
+    </summary>
+    <div
+      v-if="props.text"
+      class="thinking markdown-body"
+      v-html="thinkHtml"
+      @click="onBodyClick"
+    ></div>
+  </details>
+</template>
+
+<style scoped>
+.thinking-block {
+  border-left: 3px solid var(--vscode-charts-purple, #a6f);
+  margin: 3px 0;
+  background: rgba(160, 120, 255, 0.1);
+  font-size: 0.9em;
+}
+.think-head {
+  cursor: pointer;
+  padding: 3px 8px;
+  font-weight: 600;
+  opacity: 0.8;
+  user-select: none;
+  list-style: none;
+}
+.think-head::-webkit-details-marker {
+  display: none;
+}
+.think-head::before {
+  content: '▶';
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 0.8em;
+  transition: transform 0.12s ease;
+}
+.thinking-block[open] > .think-head::before {
+  transform: rotate(90deg);
+}
+.thinking {
+  padding: 3px 8px;
+  opacity: 0.92;
+  word-break: break-word;
+}
+
+/* Markdown content styling (mirrors .markdown-body in MessageItem) */
+.thinking :deep(p) {
+  margin: 0 0 6px;
+}
+.thinking :deep(p:last-child) {
+  margin-bottom: 0;
+}
+.thinking :deep(ul),
+.thinking :deep(ol) {
+  margin: 0 0 6px;
+  padding-left: 20px;
+}
+.thinking :deep(li) {
+  margin: 1px 0;
+}
+.thinking :deep(strong) {
+  font-weight: 700;
+}
+.thinking :deep(em) {
+  font-style: italic;
+}
+.thinking :deep(a) {
+  color: var(--vscode-textLink-foreground, #4af);
+  text-decoration: underline;
+}
+.thinking :deep(blockquote) {
+  border-left: 3px solid var(--vscode-panel-border, #333);
+  margin: 6px 0;
+  padding-left: 8px;
+  opacity: 0.85;
+}
+.thinking :deep(code) {
+  background: rgba(127, 127, 127, 0.18);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+.thinking :deep(.code-block) {
+  margin: 6px 0;
+  border: 1px solid var(--vscode-panel-border, #333);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+.thinking :deep(.code-head) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 8px;
+  background: rgba(127, 127, 127, 0.1);
+  border-bottom: 1px solid var(--vscode-panel-border, #333);
+}
+.thinking :deep(.code-lang) {
+  font-size: 0.7em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+}
+.thinking :deep(.code-copy) {
+  font-size: 0.7em;
+  padding: 1px 8px;
+  border: 1px solid var(--vscode-panel-border, #333);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-foreground, #ddd);
+  cursor: pointer;
+}
+.thinking :deep(.code-copy:hover) {
+  background: rgba(127, 127, 127, 0.15);
+}
+.thinking :deep(.code-copy:disabled) {
+  opacity: 0.6;
+  cursor: default;
+}
+.thinking :deep(pre.code-body) {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+.thinking :deep(pre.code-body code) {
+  background: none;
+  padding: 0;
+  font-size: 0.85em;
+  font-family: var(--vscode-editor-font-family, monospace);
+  white-space: pre;
+}
+</style>

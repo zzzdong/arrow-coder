@@ -1,0 +1,49 @@
+Use the `bash` tool to run one-off shell commands.
+
+**Key characteristics:**
+- **Stateless**: Each command runs independently in a fresh environment
+
+**Timeout:**
+- The `timeout` argument controls how long the command can run before being killed
+- When `timeout` is not specified (or set to `None`), the config default is used
+- If a command is timing out, do not hesitate to increase the timeout using the `timeout` argument
+
+**IMPORTANT: Use dedicated tools if available instead of these bash commands:**
+
+**File Operations - DO NOT USE:**
+- `cat filename` → Use `read(file_path="filename")`
+- `head -n 20 filename` → Use `read(file_path="filename", limit=20)`
+- `tail -n 20 filename` → Read with offset: `read(file_path="filename", offset=<line_number>, limit=20)`
+- `sed -n '100,200p' filename` → Use `read(file_path="filename", offset=100, limit=101)`
+- `less`, `more`, `vim`, `nano` → Use `read` with offset/limit for navigation
+- `echo "content" > file` → Use `write_file(path="file", content="content")`
+- `echo "content" >> existing_file` → Read first, then use `search_replace` to append (write_file refuses to overwrite)
+
+**Search Operations - DO NOT USE:**
+- `grep -r "pattern" .` → Use `grep(pattern="pattern", path=".")`
+- `find . -name "*.py"` → Use `bash("ls -la")` for current dir or `grep` with appropriate pattern
+- `ag`, `ack`, `rg` commands → Use the `grep` tool
+- `locate` → Use `grep` tool
+
+**File Modification - DO NOT USE:**
+- `sed -i 's/old/new/g' file` → Use `edit` tool
+- `awk` for file editing → Use `edit` tool
+- Any in-place file editing → Use `edit` tool
+
+**APPROPRIATE bash uses:**
+- System information: `pwd`, `whoami`, `date`, `uname -a`
+- Directory listings: `ls -la`, `tree` (if available)
+- Git operations: `git status`, `git log --oneline -10`, `git diff`
+- Process info: `ps aux | grep process`, `top -n 1`
+- Network checks: `ping -c 1 google.com`, `curl -I https://example.com`
+- Package management: `pip list`, `npm list`
+- Environment checks: `env | grep VAR`, `which python`
+- File metadata: `stat filename`, `file filename`, `wc -l filename`
+
+**Example: Reading a large file efficiently**
+
+WRONG:
+```bash
+bash("cat large_file.txt")  # May hit size limits
+bash("head -1000 large_file.txt")  # Inefficient
+```

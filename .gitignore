@@ -1,1 +1,8 @@
-/target
+target/
+
+# VS Code extension (TypeScript) build artifacts
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/bin/**
+*.vsix
+

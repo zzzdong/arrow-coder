@@ -1,0 +1,101 @@
+# Arrow Code Configuration File
+# Place this file at ~/.vibe/config.toml or .vibe/config.toml (project-local)
+
+# Active model alias to use
+active_model = "mistral-medium"
+
+# Default agent profile
+default_agent = "default"
+
+# Behavior settings
+bypass_tool_permissions = false
+context_warnings = true
+
+# [[providers]]
+# name = "mistral"
+# api_base = "https://api.mistral.ai/v1"
+# api_key_env_var = "MISTRAL_API_KEY"
+# backend = "mistral"
+#
+# [[providers]]
+# name = "openai"
+# api_base = "https://api.openai.com/v1"
+# api_key_env_var = "OPENAI_API_KEY"
+# backend = "openai"
+# reasoning_field_name = "reasoning_content"
+#
+# [[providers]]
+# name = "deepseek"
+# api_base = "https://api.deepseek.com"
+# api_key_env_var = "DEEPSEEK_API_KEY"
+# # Use the dedicated DeepSeek Chat Completions backend (own wire format:
+# # top-level `thinking`, `user_id` instead of `user`, `reasoning_content`,
+# # DeepSeek-specific usage fields).
+# backend = "deepseek-chat"
+# reasoning_field_name = "reasoning_content"
+#
+# [[providers]]
+# name = "deepseek-responses"
+# api_base = "https://api.deepseek.com"
+# api_key_env_var = "DEEPSEEK_API_KEY"
+# # Use the dedicated DeepSeek Responses API backend (`/responses`): `input`
+# # items + `instructions`, `reasoning: { effort }`, `output` function_call
+# # items, semantic SSE event stream (no `[DONE]`).
+# backend = "deepseek-responses"
+# reasoning_field_name = "reasoning_content"
+
+# [[models]]
+# name = "mistral-large-latest"
+# provider = "mistral"
+# alias = "mistral-large"
+# temperature = 0.2
+# max_tokens = 128000
+# input_price = 2.0
+# output_price = 6.0
+# thinking = "high"
+#
+# [[models]]
+# name = "deepseek-chat"
+# provider = "deepseek"
+# alias = "deepseek"
+# temperature = 0.2
+# max_tokens = 64000
+# input_price = 0.5
+# output_price = 2.0
+# # DeepSeek thinking mode. `thinking` accepts a switch or a preset effort:
+# #   "enabled" | "disabled" | "auto"   (switch; "auto"/unset = provider default)
+# #   "low" | "medium" | "high" | "xhigh" | "max"   (enables thinking at that tier)
+# # When a preset effort string is used, reasoning_effort is sent automatically.
+# # Canonical wire tiers: low < high (medium/xhigh collapse to high) < max.
+# # Note: temperature/top_p are IGNORED by DeepSeek while thinking is enabled.
+# thinking = "high"
+# # Optional explicit effort override (low|medium|high|xhigh|max); only used
+# # when `thinking` is a switch rather than a preset effort.
+# # reasoning_effort = "high"
+
+# Skill paths - additional directories to search for skills
+# skill_paths = ["~/custom-skills", "./my-skills"]
+
+# Enable/disable specific skills
+# enabled_skills = ["vibe", "rust-dev", "python-dev"]
+# disabled_skills = ["experimental-skill"]
+
+# Tool configuration
+# [tools.bash]
+# permission = "ask"
+#
+# [tools.write_file]
+# permission = "ask"
+
+# MCP servers
+# [[mcp_servers]]
+# name = "filesystem"
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+#
+# [[mcp_servers]]
+# name = "github"
+# transport = "http"
+# url = "https://api.github.com/mcp"
+# api_key_env = "GITHUB_TOKEN"
