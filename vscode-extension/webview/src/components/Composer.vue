@@ -1,10 +1,75 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import { useChatStore } from '../stores/chat';
 import { rpc } from '../rpc';
 import ContextMeter from './ContextMeter.vue';
 
 const store = useChatStore();
+
+// ---- Turn-level "still working" status (harness `TurnStatus` parity) --------
+// A single status line that rides the whole running turn — first-token wait,
+// tool execution, and streaming — so it never flickers per step. It shows a
+// phase label (thinking vs. running a tool vs. processing) and, once the turn
+// has clearly been running a while (>=15s, harness threshold), a live clock so
+// the user can see the agent is still making progress.
+const PHASE_CLOCK_THRESHOLD_MS = 15_000;
+
+// Whether any tool invocation is currently running: a tool card was opened by a
+// `tool_call` but has not yet received its `tool_result`. Mirrors how a
+// long-running shell/bash call would otherwise look identical to an idle wait.
+const anyToolRunning = computed(() =>
+  store.messages.some(
+    (m) =>
+      m.role === 'tool' &&
+      m.tool !== undefined &&
+      m.tool.result === undefined &&
+      m.tool.error === undefined,
+  ),
+);
+
+// Phase label inferred from the live stream + tool state (harness keeps one
+// "Deep diving..." label across phases; we surface the phase so the user can
+// tell "waiting on the model" from "running a long tool").
+const phaseLabel = computed(() => {
+  if (anyToolRunning.value) return '执行工具中…';
+  if (store.thinkStreamActive) return '思考中…';
+  return '正在处理…';
+});
+
+// Live elapsed clock, updated once per second while busy.
+const elapsedMs = ref(0);
+let timer: ReturnType<typeof setInterval> | null = null;
+function startClock() {
+  stopClock();
+  elapsedMs.value = Date.now() - (store.turnStartTime || Date.now());
+  timer = setInterval(() => {
+    elapsedMs.value = Date.now() - (store.turnStartTime || Date.now());
+  }, 1000);
+}
+function stopClock() {
+  if (timer !== null) {
+    clearInterval(timer);
+    timer = null;
+  }
+  elapsedMs.value = 0;
+}
+watch(
+  () => store.busy,
+  (busy) => {
+    if (busy) startClock();
+    else stopClock();
+  },
+  { immediate: true },
+);
+onUnmounted(stopClock);
+
+function fmtClock(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+const showClock = computed(() => elapsedMs.value >= PHASE_CLOCK_THRESHOLD_MS);
 
 // Slash-commands: locally handled actions (never sent to the LLM as a prompt).
 // Aligns with harness's slash-command lifecycle (`/compact`, ...).
@@ -224,6 +289,15 @@ function focusInput() {
 
 <template>
   <div class="inputbar">
+    <!-- Turn-level "still working" status (harness TurnStatus parity): rides the
+         whole running turn so it never flickers per step; shows the phase and,
+         once long-running (>=15s), a live elapsed clock. -->
+    <div v-if="store.busy && !store.pendingPermission && !store.pendingQuestion" class="work-status" role="status" aria-live="polite">
+      <span class="ws-spinner" aria-hidden="true" />
+      <span class="ws-phase">{{ phaseLabel }}</span>
+      <span v-if="showClock" class="ws-clock" aria-hidden="true">{{ fmtClock(elapsedMs) }}</span>
+    </div>
+
     <!-- Multi-line input area (bound to shared draft so the input toolbar can insert) -->
     <div class="input-wrap">
       <!-- Slash-command completion popover -->
@@ -322,6 +396,37 @@ function focusInput() {
   padding: 8px 10px 6px;
   border-top: 1px solid var(--vscode-panel-border, #333);
   background: rgba(127,127,127,.02);
+}
+
+/* ---- Turn-level "still working" status (harness TurnStatus parity) ---- */
+.work-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground, #999);
+  padding: 0 1px;
+}
+.ws-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--vscode-progressBar-background, rgba(120,120,120,0.25));
+  border-top-color: var(--vscode-progressBar-background, #4ec9b0);
+  border-radius: 50%;
+  animation: ws-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes ws-spin {
+  to { transform: rotate(360deg); }
+}
+.ws-phase {
+  font-weight: 500;
+}
+.ws-clock {
+  margin-left: 2px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground, #999);
 }
 .input-wrap {
   position: relative;

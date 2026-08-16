@@ -271,6 +271,23 @@ pub struct AgentStats {
     pub tokens_per_second: f64,
     pub input_price_per_million: f64,
     pub output_price_per_million: f64,
+    /// Last real provider-reported prompt size (harness `pressureTokens`).
+    /// Last-wins across requests, so it reflects the most recent request rather
+    /// than the cumulative session total.
+    #[serde(default)]
+    pub last_request_prompt_tokens: u64,
+    /// Provider-anchored calibration ratio: `last_request_prompt_tokens` divided
+    /// by the surface estimate at that request. Used to scale the cheap
+    /// character-based surface estimate into real tokens (harness style).
+    #[serde(default)]
+    pub context_calibration_ratio: f64,
+    /// Projected prompt tokens for the *next* request (harness
+    /// `projectedTokens`), computed from the current surface × ratio.
+    #[serde(default)]
+    pub context_projected_tokens: u64,
+    /// Heuristic composition of the projected context (system / tools / messages).
+    #[serde(default)]
+    pub context_breakdown: Option<ContextBreakdown>,
 }
 
 impl AgentStats {
@@ -385,6 +402,33 @@ pub struct UsageEvent {
     /// (100.0+ once over budget). Mirrors harness's context percent.
     #[serde(default)]
     pub context_percent: f64,
+    /// Projected prompt-side tokens for the *next* request (the harness
+    /// `contextPressure.projectedTokens`): the last real prompt size anchored
+    /// to the current surface estimate. Reacts immediately to compaction and
+    /// new turns without re-querying the provider.
+    #[serde(default)]
+    pub context_projected_tokens: Option<u64>,
+    /// Heuristic composition of the projected context (harness
+    /// `contextBreakdown`): the system prompt, the tool schemas, and the
+    /// conversation messages. Each is a rough character-based estimate scaled
+    /// by the provider-anchored calibration ratio.
+    #[serde(default)]
+    pub context_breakdown: Option<ContextBreakdown>,
+}
+
+/// Heuristic breakdown of projected context tokens into its three sources,
+/// mirroring deepseek-harness's `contextBreakdown` (system / tools / messages).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ContextBreakdown {
+    pub system: u64,
+    pub tools: u64,
+    pub messages: u64,
+}
+
+impl ContextBreakdown {
+    pub fn total(&self) -> u64 {
+        self.system + self.tools + self.messages
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1400,6 +1400,12 @@ fn map_event(ev: BaseEvent) -> Vec<Event> {
             context_window: u.context_window,
             context_used_tokens: u.context_used_tokens,
             context_percent: u.context_percent,
+            context_projected_tokens: u.context_projected_tokens,
+            context_breakdown: u.context_breakdown.map(|b| crate::jsonrpc::ContextBreakdown {
+                system: b.system,
+                tools: b.tools,
+                messages: b.messages,
+            }),
         })],
         BaseEvent::ToolStream(t) => vec![Event::ToolStream {
             id: t.tool_call_id,

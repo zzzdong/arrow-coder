@@ -3,9 +3,10 @@ use crate::agent::middleware::{
     PriceLimitMiddleware, ResetReason, TurnLimitMiddleware,
 };
 use crate::core::{
-    AgentStats, AssistantEvent, AvailableFunction, AvailableTool, BaseEvent, CompactEndEvent, FileCheckpointer, LLMChunk, LLMMessage, Role, ToolResultEvent,
+    AgentStats, AssistantEvent, AvailableFunction, AvailableTool, BaseEvent, CompactEndEvent, ContextBreakdown, FileCheckpointer, LLMChunk, LLMMessage, LLMUsage, Role, ToolResultEvent,
     ToolStreamEvent, UserMessageEvent, VibeConfig,
 };
+use crate::core::estimate::estimate_tokens;
 use crate::llm::backend::BackendLike;
 use crate::core::ToolChoice;
 use crate::tools::base::{InvokeContext, Tool, ToolOutput, UserInputCallback};
@@ -525,9 +526,16 @@ impl AgentLoop {
         // output) against the model's configured window — mirrors harness's
         // `contextPressure` (percent + used/window).
         let context_window = self.config.max_session_tokens.unwrap_or(128_000);
-        let context_used_tokens = stats.session_prompt_tokens + stats.session_cache_hit_tokens;
+        // Harness `contextPressure.pressureTokens`: the most recent real provider
+        // prompt size (last-wins), not the cumulative session total. This avoids
+        // the occupancy inflating monotonically and stays correct after compaction.
+        let context_used_tokens = stats.last_request_prompt_tokens;
+        // Harness `contextOccupancy` = projected ?? pressure. We always have a
+        // projected value once a request has completed.
+        let context_projected = stats.context_projected_tokens;
         let context_percent = if context_window > 0 {
-            context_used_tokens as f64 / context_window as f64
+            (context_projected as f64 / context_window as f64)
+                .max(context_used_tokens as f64 / context_window as f64)
         } else {
             0.0
         };
@@ -542,6 +550,8 @@ impl AgentLoop {
             context_window,
             context_used_tokens,
             context_percent,
+            context_projected_tokens: Some(context_projected),
+            context_breakdown: stats.context_breakdown,
         });
         let _ = self.event_tx.send(ev);
     }
@@ -612,7 +622,65 @@ impl AgentLoop {
         }
 
         // Emit the live usage event (same as per-call, but with final duration).
+        // The context projection (harness projectedTokens + breakdown) was already
+        // updated on the last LLM call of the turn via `update_context_projection`.
         self.emit_usage();
+    }
+
+    /// Recompute the projected context occupancy for the *next* request, mirroring
+    /// deepseek-harness's `contextPressure`:
+    ///
+    /// - `pressure_tokens` = the most recent real provider-reported prompt size
+    ///   (last-wins, not the cumulative session total).
+    /// - `projected_tokens` = current surface estimate × calibration ratio, where
+    ///   the ratio anchors the cheap character-based estimate to the real prompt
+    ///   size. This reacts immediately to compaction and new turns.
+    /// - `context_breakdown` = a heuristic system / tools / messages composition,
+    ///   each scaled by the same ratio.
+    ///
+    /// The surface estimate is intentionally rough (character-density heuristic,
+    /// CJK/JSON under-estimated) — exactly as the harness notes its estimates are.
+    fn update_context_projection(
+        &mut self,
+        usage: &LLMUsage,
+        backend_messages: &[LLMMessage],
+        tools: &[AvailableTool],
+    ) {
+        let surface_system: u64 = backend_messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| estimate_tokens(m.content.as_deref().unwrap_or("")))
+            .sum();
+        let surface_messages: u64 = backend_messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| estimate_tokens(m.content.as_deref().unwrap_or("")))
+            .sum();
+        let surface_tools: u64 = tools
+            .iter()
+            .map(|t| estimate_tokens(&format!("{}{}{}", t.function.name, t.function.description, t.function.parameters)))
+            .sum();
+
+        let pressure = usage.prompt_tokens as u64;
+        let pressure_surface = surface_system + surface_tools + surface_messages;
+        let ratio = if pressure_surface > 0 {
+            pressure as f64 / pressure_surface as f64
+        } else {
+            0.0
+        };
+
+        let projected = ((surface_system + surface_tools + surface_messages) as f64 * ratio) as u64;
+        let breakdown = ContextBreakdown {
+            system: (surface_system as f64 * ratio) as u64,
+            tools: (surface_tools as f64 * ratio) as u64,
+            messages: (surface_messages as f64 * ratio) as u64,
+        };
+
+        let mut s = self.stats.lock().unwrap();
+        s.last_request_prompt_tokens = pressure;
+        s.context_calibration_ratio = ratio;
+        s.context_projected_tokens = projected;
+        s.context_breakdown = Some(breakdown);
     }
 
     /// Expand `@`-referenced file/directory paths into inline content, appended
@@ -1430,6 +1498,11 @@ impl AgentLoop {
                     // Update stats
                     if let Some(u) = usage {
                         self.stats.lock().unwrap().record_usage(u);
+                        // Project next-request context occupancy (harness
+                        // projectedTokens + breakdown) from this request's real
+                        // prompt size and the surface we just sent. Reacts to
+                        // compaction and new turns immediately.
+                        self.update_context_projection(&u, &backend_messages, &available_tools);
                         // Push a live usage snapshot after every LLM call so the
                         // UI updates tokens / cache rate without waiting for the
                         // turn to finish.
@@ -1637,10 +1710,15 @@ impl AgentLoop {
                                             ).await;
 
                                             if response == ApprovalResponse::Yes {
-                                                // Add rule to store if session or always
+                                                // Add rule to store if session or always.
+                                                // Session/Always approval approves the *tool* for
+                                                // the remainder of the session, not just this one
+                                                // specific path/command — otherwise the prompt would
+                                                // re-appear on the next turn for the same tool.
                                                 if let Some(ref checker) = self.permission_checker {
                                                     match approval_type {
                                                         ApprovalType::Session | ApprovalType::Always => {
+                                                            checker.approve_tool(&call.function.name);
                                                             for req_perm in required_perms {
                                                                 checker.add_rule(ApprovedRule {
                                                                     tool_name: call.function.name.clone(),
@@ -2268,6 +2346,9 @@ impl AgentLoop {
             // Update stats
             if let Some(u) = usage {
                 self.stats.lock().unwrap().record_usage(u);
+                // Project next-request context occupancy (harness projectedTokens
+                // + breakdown) from this request's real prompt size and surface.
+                self.update_context_projection(&u, &backend_messages, &available_tools);
                 // Live usage update after every LLM call.
                 self.emit_usage();
             }
@@ -2447,10 +2528,15 @@ impl AgentLoop {
                                 ).await;
 
                                 if response == ApprovalResponse::Yes {
-                                    // Add rule to store if session or always
+                                    // Add rule to store if session or always.
+                                    // Session/Always approval approves the *tool* for
+                                    // the remainder of the session, not just this one
+                                    // specific path/command — otherwise the prompt would
+                                    // re-appear on the next turn for the same tool.
                                     if let Some(ref checker) = self.permission_checker {
                                         match approval_type {
                                             ApprovalType::Session | ApprovalType::Always => {
+                                                checker.approve_tool(&call.function.name);
                                                 for req_perm in required_perms {
                                                     checker.add_rule(ApprovedRule {
                                                         tool_name: call.function.name.clone(),

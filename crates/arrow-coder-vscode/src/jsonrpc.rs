@@ -144,6 +144,23 @@ pub struct UsagePayload {
     /// Occupancy ratio `context_used_tokens / context_window` in 0.0–1.0.
     #[serde(default)]
     pub context_percent: f64,
+    /// Projected prompt-side tokens for the next request (harness
+    /// `contextPressure.projectedTokens`): last real prompt size anchored to the
+    /// current surface estimate. Reacts to compaction and new turns.
+    #[serde(default)]
+    pub context_projected_tokens: Option<u64>,
+    /// Heuristic composition of the projected context (harness
+    /// `contextBreakdown`): system prompt / tool schemas / conversation messages.
+    #[serde(default)]
+    pub context_breakdown: Option<ContextBreakdown>,
+}
+
+/// Heuristic breakdown of projected context tokens (harness contextBreakdown).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ContextBreakdown {
+    pub system: u64,
+    pub tools: u64,
+    pub messages: u64,
 }
 
 /// Payload for a `session/user_question` notification. Carries one or more

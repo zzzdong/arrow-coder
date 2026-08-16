@@ -216,3 +216,99 @@
   是 wire format 的权威来源；arrow-coder 的 `deepseek.rs` 类型注释也应标注来源与校验日期。
 - **请求可选字段 omit 而非 null**：`serializeRequest` 用展开运算 `...cond ? {field} : {}` 省略缺失字段，
   让 provider 默认生效——arrow-coder 的 `skip_serializing_if` 已达同等效果。
+
+---
+
+## 6. 上下文容量统计（contextPressure）对齐实现
+
+> 目标：让 arrow-coder 的「会话上下文占用」仪表（前端 `ContextMeter`）与 deepseek-harness 的
+> `contextPressure` 语义一致——显示**下一次请求**的预计占用，而非累积会话总量；并在压缩/新轮后
+> 立即反应。
+
+### 6.1 Harness 的真实语义（来源：`packages/llm/token-meter/`）
+
+- **`pressureTokens`**：最近**一次**请求 provider 上报的 prompt 大小（uncached input + cache
+  read/write，不含输出）。`last-wins`，首请求前为 `0`。
+- **`projectedTokens`**：下一次请求的预测成本 =
+  `pressureTokens + 自上次采样以来 surface 变化的启发式重定价`（O(1) delta，锚定在 provider 值上）。
+  对 compaction 阴影 span 立即反应；首请求前为 `0`。
+- **`contextWindow`**：最新路线容量（adapter 广告），无则为空。
+- **`contextOccupancy`** = `(projectedTokens ?? pressureTokens ?? 0) / contextWindow`，无 window 时 `undefined`。
+- **`contextBreakdown`**：`{ system, tools, messages }` 三段启发式构成（固定密度估算，不与 provider
+  锚定值相加）；注释明确「character-based estimates are rough」。
+- 前端 `ContextMeter.tsx` 用 `pressure.pressureTokens` 作「last request cost」标签；
+  `statsLine` 用 `liveContextOccupancy`（= `contextOccupancy`，优先 projected）作容量环。
+
+### 6.2 arrow-coder 对齐实现
+
+**协议（前端 `protocol.ts` 的 `UsageParams`）** 新增：
+- `context_projected_tokens?: number`（对应 `projectedTokens`）
+- `context_breakdown?: { system, tools, messages }`（对应 `contextBreakdown`）
+- `context_used_tokens` 语义改为「最近一次请求 prompt（last-wins）」而非累积总量；
+  `context_percent` 基于 projected（缺失时回退 used），对应 `contextOccupancy`。
+
+**后端（`arrow-coder-core`）**：
+- 新增 `core::estimate`（`estimate_tokens(text)`）：轻量字符级估算器，CJK ~1.5 字符/token（低估）、
+  其它 ~4 字符/token，对齐 harness「CJK/JSON 偏低估」注释，零依赖、零网络。
+- `UsageEvent` 新增 `context_projected_tokens: Option<u64>` 与 `context_breakdown: Option<ContextBreakdown>`。
+- `AgentStats` 新增 `last_request_prompt_tokens`（= pressure）、`context_calibration_ratio`、
+  `context_projected_tokens`、`context_breakdown`。
+- `AgentLoop::update_context_projection(usage, backend_messages, tools)`：在每个 LLM 调用拿到
+  `usage` 后调用（即 `record_usage` 处，此时 `backend_messages`/`available_tools` 正好是该次请求的
+  surface）；
+  - 三段 surface 估算：system = backend_messages 中 `role==System` 的文本；tools = 各 tool 的
+    `name+description+parameters`；messages = 其余 surface。
+  - `ratio = pressure / pressureSurface`（provider 锚定校准比）；
+  - `projected = currentSurface * ratio`；`breakdown` 三段各自 `* ratio`，使三者之和 ≈ projected。
+- `emit_usage`：用 `last_request_prompt_tokens` 作为 `context_used_tokens`，`context_percent` 取
+  `max(projected, pressure)/window`（= harness `contextOccupancy`）。
+
+**前端（`ContextMeter.vue`）**：环的占用读 `context_percent`（已对应 projected）；popover 改为
+展示「下一次请求预计占用」+ 三段 breakdown 堆叠条（系统/工具/消息，三色图例），并对齐「立即压缩」入口。
+
+### 6.3 与旧实现的差异（为什么改）
+
+| 维度 | 旧（迭代前） | 新（对齐 harness） |
+|---|---|---|
+| `context_used_tokens` | 累积会话 input（单调增大、首轮虚高、压缩后不降） | 最近一次请求 prompt（last-wins） |
+| 是否反映「下次请求」 | 否 | 是（`projectedTokens`，压缩/新轮立即反应） |
+| `contextBreakdown` | 无 | 有（system/tools/messages 三段） |
+| `context_percent` 分母 | window | window（分子改为 projected） |
+
+> 注：harness 用「精确 BPE + 增量重定价」；arrow-coder 用「字符级估算 + provider 校准比」，
+> 这是刻意的轻量化取舍（零依赖），绝对数值偏差在估算误差内，但**相对变化（压缩/新轮）的反应方向
+> 与幅度与 harness 一致**。
+
+---
+
+## 7. 工作中状态指示（TurnStatus）对齐实现
+
+> 目标：长耗时工具执行或等待 LLM 首 token/响应时，用户能明确看到「agent 还在工作」。
+
+### 7.1 Harness 的真实语义（来源：`packages/client/ui-conversation/src/client/skeleton/TurnStatus.tsx`）
+
+- 一个跨整条运行 turn 的**常驻**状态组件（`busy` 时显示），覆盖首 token 等待、工具执行、流式输出——**不会**每个步骤闪烁。
+- 文案固定为 "Deep diving…"（不细分阶段）。
+- **计时器阈值**：`showClock = elapsedMs >= 15_000`——运行超过 15 秒才显示耗时，避免短任务闪烁数字；计时基于 turn 起始时间戳。
+- 用一个「转圈 + 文案 + （可选）计时」组合，而非多个分散的 spinner。
+
+### 7.2 arrow-coder 对齐实现
+
+**前端（`Composer.vue`，输入框顶部常驻行，对齐 harness TurnStatus 放在 ChatView 底部）：**
+
+- `busy` 时显示一行状态（隐藏条件：`pendingPermission` / `pendingQuestion` 为真时隐藏，因为此时在**等用户**而非工作）。
+- spinner 旋转动画 + 阶段文案，三态由现有信号推断（对齐 harness 不分阶段，但 arrow-coder 已能区分，故细分以区分"等模型"与"跑工具"）：
+  - 有未结算的 tool 卡片（`tool_call` 已到、`tool_result` 未到，即 `m.tool.result/error` 仍 `undefined`）→ **「执行工具中…」**（覆盖长耗时工具场景）；
+  - 否则若 `thinkStreamActive`（正在收 think 流）→ **「思考中…」**（覆盖等待 LLM 响应/首 token 场景）；
+  - 否则 → **「正在处理…」**。
+- 计时器：`watch(busy)` 启动 `setInterval`，每秒更新 `elapsedMs = now - store.turnStartTime`；**≥15s**（harness 阈值）才显示该耗时 `m:ss`，短任务不闪数字。
+- 等待用户（权限/提问）时不显示，避免误导。
+
+**信号来源（前端现有，无需后端改动）：**
+- `store.busy`：turn 级运行中（`agent/run_start` → `agent/done/error`），工具执行与 LLM 调用期间恒为 `true`，保证状态行常驻。
+- `store.thinkStreamActive`、`store.messages` 中 tool 卡片的 `result/error` 字段、`store.turnStartTime`。
+
+### 7.3 要点
+
+- 单一常驻状态行 + 阶段文案 + 阈值计时，与 harness `TurnStatus` 的「不闪烁、长任务才显时钟」一致。
+- 利用 arrow-coder 已有的细粒度事件（tool_call/tool_result/think）进一步区分「等模型」与「跑工具」，比 harness 单一 "Deep diving…" 信息量更高，但保持同一视觉位置、同一不闪烁策略。

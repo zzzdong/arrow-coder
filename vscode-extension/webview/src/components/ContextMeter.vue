@@ -15,21 +15,29 @@
         cx="7"
         cy="7"
         r="5.5"
-        :stroke-dasharray="`${circumference * pct} ${circumference}`"
+        :stroke-dasharray="`${CIRCUMFERENCE * pct} ${CIRCUMFERENCE}`"
         transform="rotate(-90 7 7)"
       />
     </svg>
-    <!-- Popover: used / window + percent -->
+    <!-- Popover: projected / window + system/tools/messages breakdown -->
     <div v-if="open" class="ctx-pop" role="dialog" @click.stop>
       <div class="ctx-head">
         <span class="ctx-pct">{{ pctText }}</span>
-        <span class="ctx-figures">~{{ fmt(context.context_used_tokens) }} / {{ fmt(context.context_window) }}</span>
+        <span class="ctx-figures">~{{ fmt(projected) }} / {{ fmt(context.context_window) }}</span>
       </div>
-      <div class="ctx-bar">
-        <div class="ctx-seg" :style="{ width: barWidth }" />
+      <!-- Stacked breakdown bar (harness contextBreakdown: system/tools/messages) -->
+      <div v-if="breakdown" class="ctx-stack">
+        <div class="ctx-seg seg-system" :style="{ width: segWidth('system') }" />
+        <div class="ctx-seg seg-tools" :style="{ width: segWidth('tools') }" />
+        <div class="ctx-seg seg-messages" :style="{ width: segWidth('messages') }" />
+      </div>
+      <div v-if="breakdown" class="ctx-legend">
+        <span class="lg"><i class="dot seg-system" />系统 {{ fmt(breakdown.system) }}</span>
+        <span class="lg"><i class="dot seg-tools" />工具 {{ fmt(breakdown.tools) }}</span>
+        <span class="lg"><i class="dot seg-messages" />消息 {{ fmt(breakdown.messages) }}</span>
       </div>
       <div class="ctx-note">
-        上下文已用 {{ pctText }} · {{ fmt(context.context_used_tokens) }} tokens
+        下一次请求预计占用 {{ pctText }}（基于最近一次实际用量推算）
       </div>
       <button
         class="ctx-compact"
@@ -70,13 +78,36 @@ const pct = computed(() => {
   return Math.max(0, Math.min(1, p));
 });
 const pctText = computed(() => `${Math.round(pct.value * 100)}%`);
-const barWidth = computed(() => `${Math.max(0.5, pct.value * 100)}%`);
 const tone = computed(() => {
   const p = pct.value;
   if (p >= 0.8) return 'high';
   if (p >= 0.6) return 'warn';
   return 'ok';
 });
+
+// Harness `contextPressure.projectedTokens`: the estimated cost of the NEXT
+// request. Falls back to the last real prompt (`pressureTokens`) before the
+// first projection is available.
+const projected = computed<number>(() => {
+  const c = context.value;
+  if (!c) return 0;
+  return c.context_projected_tokens ?? c.context_used_tokens ?? 0;
+});
+
+// Harness `contextBreakdown`: heuristic system / tools / messages composition.
+const breakdown = computed(() => context.value?.context_breakdown ?? null);
+
+const segWidth = (key: 'system' | 'tools' | 'messages') => {
+  const b = breakdown.value;
+  const c = context.value;
+  if (!b || !c || !c.context_window || c.context_window <= 0) return '0%';
+  const total = b.system + b.tools + b.messages;
+  if (total <= 0) return '0%';
+  // Segments scale to the projected occupancy of the window, so the stack
+  // reads like a single context bar whose parts are system/tools/messages.
+  const ratio = Math.min(1, projected.value / c.context_window);
+  return `${Math.max(0, (b[key] / total) * ratio * 100)}%`;
+};
 
 const fmt = (n?: number) => {
   if (n === undefined || n < 0) return '–';
@@ -168,7 +199,8 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
   margin-left: auto;
 }
-.ctx-bar {
+.ctx-stack {
+  display: flex;
   height: 6px;
   border-radius: 3px;
   overflow: hidden;
@@ -176,9 +208,34 @@ onBeforeUnmount(() => {
 }
 .ctx-seg {
   height: 100%;
-  border-radius: 3px;
-  background: var(--accent);
   transition: width 0.25s ease;
+}
+.seg-system {
+  background: #5b8def;
+}
+.seg-tools {
+  background: #b07cf0;
+}
+.seg-messages {
+  background: var(--accent, #4ec9b0);
+}
+.ctx-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 6px;
+  color: var(--text-muted);
+}
+.ctx-legend .lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ctx-legend .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
 }
 .ctx-note {
   margin-top: 6px;

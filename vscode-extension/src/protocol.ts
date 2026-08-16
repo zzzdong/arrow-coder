@@ -319,10 +319,26 @@ export interface UsageParams {
   duration_ms?: number;
   /** Maximum context window (tokens) for the current model, if known. */
   context_window?: number;
-  /** Prompt-side tokens used against the window (input + cache traffic). */
+  /** Prompt-side tokens used against the window (input + cache traffic). Mirrors
+   *  harness `contextPressure.pressureTokens` (last-wins, not cumulative). */
   context_used_tokens?: number;
-  /** Occupancy ratio `used / window` in 0.0–1.0. */
+  /** Projected prompt-side tokens for the *next* request (harness
+   *  `contextPressure.projectedTokens`): the last real prompt size anchored to
+   *  the current surface estimate. Reacts to compaction and new turns. */
+  context_projected_tokens?: number;
+  /** Heuristic composition of the projected context (harness
+   *  `contextBreakdown`): system prompt / tool schemas / conversation messages. */
+  context_breakdown?: ContextBreakdownParams;
+  /** Occupancy ratio `projected / window` in 0.0–1.0 (falls back to
+   *  `used / window` when no projection is available yet). */
   context_percent?: number;
+}
+
+/** Heuristic breakdown of projected context tokens (harness contextBreakdown). */
+export interface ContextBreakdownParams {
+  system: number;
+  tools: number;
+  messages: number;
 }
 
 /** Notification: the host asks the user one or more questions (ask_user_question). */

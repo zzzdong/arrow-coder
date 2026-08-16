@@ -58,6 +58,13 @@ impl PermissionChecker {
         }
     }
 
+    /// Approve a tool for the remainder of the session ("session allow").
+    pub fn approve_tool(&self, tool_name: &str) {
+        if let Ok(store) = self.store.lock() {
+            store.approve_tool(tool_name);
+        }
+    }
+
     /// Set tool permission
     pub fn set_tool_permission(&self, tool_name: String, permission: ToolPermission) {
         if let Ok(store) = self.store.lock() {
@@ -112,6 +119,16 @@ impl PermissionChecker {
 
         // Check if confirmation is required
         if permission.requires_confirmation() {
+            // Session-level allow: if the user approved this tool for the
+            // session, bypass confirmation for every call regardless of the
+            // specific path/command. This prevents the prompt from re-appearing
+            // on every turn.
+            if let Ok(store) = self.store.lock() {
+                if store.is_tool_approved(&ctx.tool_name) {
+                    return PermissionCheckResult::Allow;
+                }
+            }
+
             // Build required permissions list
             let mut required_permissions = Vec::new();
 

@@ -121,6 +121,11 @@ fn glob_match(text: &str, pattern: &str) -> bool {
 pub struct PermissionStore {
     rules: Arc<Mutex<Vec<ApprovedRule>>>,
     tool_permissions: Arc<Mutex<std::collections::HashMap<String, ToolPermission>>>,
+    /// Tools the user has approved for the remainder of the session ("session
+    /// allow"). Any call to an approved tool bypasses confirmation, regardless
+    /// of the specific path/command, so the prompt does not re-appear every
+    /// turn. Mirrors deepseek-harness's session-level allow.
+    approved_tools: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl PermissionStore {
@@ -128,6 +133,7 @@ impl PermissionStore {
         Self {
             rules: Arc::new(Mutex::new(Vec::new())),
             tool_permissions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            approved_tools: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -136,6 +142,22 @@ impl PermissionStore {
         if let Ok(mut rules) = self.rules.lock() {
             rules.push(rule);
         }
+    }
+
+    /// Approve a tool for the remainder of the session ("session allow").
+    pub fn approve_tool(&self, tool_name: &str) {
+        if let Ok(mut set) = self.approved_tools.lock() {
+            set.insert(tool_name.to_string());
+        }
+    }
+
+    /// Whether a tool has been approved for the session.
+    pub fn is_tool_approved(&self, tool_name: &str) -> bool {
+        self.approved_tools
+            .lock()
+            .ok()
+            .map(|s| s.contains(tool_name))
+            .unwrap_or(false)
     }
 
     /// Check if a required permission is covered by existing rules
