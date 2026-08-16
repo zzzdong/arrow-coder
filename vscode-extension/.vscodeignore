@@ -15,5 +15,6 @@ scripts/**
 docs/**
 *.md
 .github/**
+out-pkg/**
 
 # Keep: out/ (compiled JS), bin/ (bundled host binary), package.json, README

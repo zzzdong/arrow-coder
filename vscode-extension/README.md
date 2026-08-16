@@ -68,3 +68,42 @@ npm install -g @vscode/vsce
 npm run compile
 vsce package
 ```
+
+The host binary is bundled into `bin/<platform>-<arch>/` by
+`scripts/copy-host.js` (run automatically by `vscode:prepublish`). For a
+release build, use the per-platform scripts:
+
+```bash
+cargo build -p arrow-coder-vscode --release --target x86_64-pc-windows-msvc
+node scripts/copy-host.js --target win32-x64 --release
+npm run package:win32-x64          # -> out-pkg/arrow-coder-vscode-<ver>-win32-x64.vsix
+# linux-x64 / darwin-arm64 analogues exist too
+```
+
+## Publish to Marketplaces
+
+The extension is self-contained (the Rust host binary is bundled, not
+downloaded at runtime), so the same `.vsix` works for both stores.
+
+### One-time setup
+- **VS Code Marketplace**: create a publisher at
+  <https://marketplace.visualstudio.com/manage> and generate an Azure DevOps
+  Personal Access Token (PAT). Set it as the `VSCE_PAT` repo secret.
+- **open-vsx.org**: create an account at <https://open-vsx.org/>, then reserve
+  the `arrow-coder` namespace once via
+  `npx ovsx create-namespace arrow-coder`. Set the Eclipse token as the
+  `OVSEX_TOKEN` repo secret.
+
+### Automated (recommended)
+Push a tag `vX.Y.Z` and the GitHub Actions workflow
+(`.github/workflows/release-extension.yml`) builds all three platform vsix
+artifacts on native runners and publishes them to both marketplaces using the
+stored secrets. Bump `package.json` `version` before tagging.
+
+### Manual
+```bash
+# Marketplace
+vsce publish --target win32-x64 -p "$VSCE_PAT"
+# open-vsx (same .vsix)
+ovsx publish --target win32-x64 -p "$OVSEX_TOKEN"
+```

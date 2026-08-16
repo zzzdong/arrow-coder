@@ -1,0 +1,123 @@
+name: Release VS Code Extension
+
+on:
+  push:
+    tags:
+      - 'v*'            # e.g. v0.1.0 -> publish to Marketplace + open-vsx
+  workflow_dispatch:    # manual run: builds vsix artifacts only (no publish)
+
+permissions:
+  contents: read
+
+jobs:
+  # Build the platform-specific .vsix on each native runner (Rust binaries must
+  # be compiled on their target OS). Uploads the vsix as a workflow artifact.
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: win32-x64
+            rust: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: linux-x64
+            rust: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: darwin-arm64
+            rust: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: vscode-extension
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust }}
+
+      - name: Install vsce/ovsx
+        run: npm install -g @vscode/vsce @vscode/ovsx
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build host binary (release)
+        working-directory: .
+        run: cargo build -p arrow-coder-vscode --release --target ${{ matrix.rust }}
+
+      - name: Copy host binary into extension bin/
+        run: node scripts/copy-host.js --target ${{ matrix.target }} --release
+
+      - name: Compile webview/extension
+        run: npm run compile
+
+      - name: Generate icon
+        run: node scripts/gen-icon.js
+
+      - name: Package vsix
+        run: npm run package:${{ matrix.target }}
+        env:
+          VERSION: ${{ github.ref_name }}
+
+      - name: Upload vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.target }}
+          path: vscode-extension/out-pkg/*.vsix
+
+  # Publish the three artifacts to both marketplaces on tagged releases.
+  publish:
+    name: Publish to Marketplace + open-vsx
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode-extension
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install vsce/ovsx
+        run: npm install -g @vscode/vsce @vscode/ovsx
+
+      - name: Download all vsix artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-vsix
+          merge-multiple: true
+
+      - name: Publish to VS Code Marketplace
+        if: ${{ env.VSCE_PAT != '' }}
+        run: |
+          for f in all-vsix/*.vsix; do
+            echo "Publishing $f to Marketplace"
+            vsce publish --packagePath "$f" -p "$VSCE_PAT"
+          done
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Publish to open-vsx.org
+        if: ${{ env.OVSEX_TOKEN != '' }}
+        run: |
+          for f in all-vsix/*.vsix; do
+            echo "Publishing $f to open-vsx"
+            ovsx publish "$f" -p "$OVSEX_TOKEN"
+          done
+        env:
+          OVSEX_TOKEN: ${{ secrets.OVSEX_TOKEN }}
