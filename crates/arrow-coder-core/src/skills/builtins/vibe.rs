@@ -81,34 +81,27 @@ include_project_context = true    # Include project context (git info, cwd) in s
 
 ### Provider Configuration
 
-```toml
-[[providers]]
-name = "openai"
-api_base = "https://api.openai.com/v1"
-api_key_env_var = "OPENAI_API_KEY"
-backend = "openai"
+Providers are **built in** — there are exactly two kinds, set per model:
 
-[[providers]]
-name = "local"
-api_base = "http://127.0.0.1:8080/v1"
-api_key_env_var = ""
-backend = "openai"
-```
+* `deepseek` — the request endpoint is fixed to the official DeepSeek API.
+* `openai_compatible` — an OpenAI-compatible endpoint with a configurable URL.
 
 ### Model Configuration
 
 ```toml
 [[models]]
-name = "gpt-4o"
-provider = "openai"
-alias = "gpt4o"
+name = "gpt4o"
+model_id = "gpt-4o"
+provider = "openai_compatible"   # or "deepseek"
+endpoint = "https://api.openai.com/v1"   # optional; deepseek ignores this
 temperature = 0.2
 max_tokens = 8192
 
 [[models]]
 name = "local"
-provider = "local"
-alias = "local"
+model_id = "local"
+provider = "openai_compatible"
+endpoint = "http://127.0.0.1:8080/v1"
 temperature = 0.7
 max_tokens = 4096
 ```

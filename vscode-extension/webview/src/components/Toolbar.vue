@@ -23,6 +23,9 @@
     </div>
 
     <button class="tb-icon" title="Skills" @click="openSkills">Skills</button>
+
+    <span class="tb-sep" />
+    <button class="tb-icon" title="模型配置" @click="$emit('settings')">⚙</button>
   </div>
 </template>
 
@@ -31,6 +34,7 @@ import { computed, ref } from 'vue';
 import { useChatStore } from '../stores/chat';
 
 const store = useChatStore();
+const emit = defineEmits<{ settings: [] }>();
 const showModelMenu = ref(false);
 
 const models = computed(() => store.config?.models ?? []);

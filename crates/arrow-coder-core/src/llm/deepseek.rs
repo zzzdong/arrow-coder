@@ -1460,8 +1460,10 @@ mod tests {
     fn model(reasoning_effort: Option<&str>, thinking: Option<&str>) -> ModelConfig {
         ModelConfig {
             name: "deepseek-chat".to_string(),
+            model_id: "deepseek v4 flash".to_string(),
             provider: "deepseek".to_string(),
-            alias: String::new(),
+            endpoint: None,
+            api_key: None,
             thinking: thinking.map(|s| s.to_string()),
             reasoning_effort: reasoning_effort.map(|s| s.to_string()),
             temperature: None,

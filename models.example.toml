@@ -1,0 +1,68 @@
+# Arrow Code — Standalone Model Definitions
+# Referenced by `models_file = "models.example.toml"` in config.toml.
+#
+# This file ONLY contains [[models]]. Each model is self-contained.
+#
+# Providers are BUILT IN (not configurable strings) — exactly two kinds:
+#
+#   provider = "deepseek"            请求端点固化为 DeepSeek 官方 API
+#                                    (https://api.deepseek.com，不可改)。只需选
+#                                    model_id 和填 api_key。
+#   provider = "openai_compatible"   OpenAI 兼容。可自由配置 endpoint(URL)、
+#                                    api_key、model_id 等。
+#
+# Model fields:
+#   name       display identifier (used in the selector and active_model)
+#   model_id   model id sent to the API (e.g. deepseek-chat for v4 flash,
+#              deepseek-reasoner for v4 pro)
+#   provider   "deepseek" | "openai_compatible"
+#   endpoint   openai_compatible 才需要：API base URL（省略则默认
+#              https://api.openai.com/v1）；deepseek 忽略此字段（端点已固化）
+#   api_key    可省略；省略时用 $DEEPSEEK_API_KEY / $OPENAI_API_KEY
+
+# =============================================================================
+# deepseek provider —— 端点固化官方 API，只配 model_id + api_key
+# =============================================================================
+# DeepSeek v4 flash
+[[models]]
+name = "deepseek-flash"
+model_id = "deepseek-chat"
+provider = "deepseek"
+# api_key = "sk-xxx"                     # 留空则用 $DEEPSEEK_API_KEY
+temperature = 0.2
+max_tokens = 64000
+thinking = "high"                        # 思考模式开关/预设档位
+reasoning_effort = "high"                # 推理强度（deepseek: off | high | max）
+
+# DeepSeek v4 pro（同一 provider，不同 model_id，可用不同 key）
+[[models]]
+name = "deepseek-pro"
+model_id = "deepseek-reasoner"
+provider = "deepseek"
+temperature = 0.2
+max_tokens = 64000
+thinking = "high"
+reasoning_effort = "max"
+
+# =============================================================================
+# openai_compatible provider —— 可自由配置 endpoint / key / model_id
+# =============================================================================
+# 通过兼容网关转发到 DeepSeek（或任意 OpenAI 兼容服务）
+[[models]]
+name = "my-gateway"
+model_id = "deepseek-chat"               # 网关可转发到任意模型 id
+provider = "openai_compatible"
+endpoint = "https://your-gateway.example.com/v1"
+api_key = "sk-your-gateway-key"
+temperature = 0.2
+max_tokens = 8192
+
+# 直接使用 OpenAI 官方（省略 endpoint 即默认 https://api.openai.com/v1）
+# [[models]]
+# name = "gpt4o"
+# model_id = "gpt-4o"
+# provider = "openai_compatible"
+# temperature = 0.2
+# max_tokens = 8192
+
+# 新增一个模型：只需在此追加一个 [[models]] 块即可。

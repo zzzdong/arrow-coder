@@ -47,7 +47,7 @@ jobs:
           targets: ${{ matrix.rust }}
 
       - name: Install vsce/ovsx
-        run: npm install -g @vscode/vsce @vscode/ovsx
+        run: npm install -g @vscode/vsce ovsx
 
       - name: npm ci
         run: npm ci

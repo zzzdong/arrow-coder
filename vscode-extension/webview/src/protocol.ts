@@ -37,4 +37,6 @@ export type {
   TurnStatsParams,
   SlashCommand,
   UiMessageParams,
+  ConfigModel,
+  ConfigView,
 } from '../../src/protocol';

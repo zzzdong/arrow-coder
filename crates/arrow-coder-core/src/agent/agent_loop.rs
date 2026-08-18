@@ -3203,8 +3203,10 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::new(vec![first, second]));
         let model = crate::core::config::ModelConfig {
             name: "mock".into(),
-            provider: "mock".into(),
-            alias: "mock".into(),
+            model_id: "mock".into(),
+            provider: "openai_compatible".into(),
+            endpoint: None,
+            api_key: None,
             thinking: None,
             reasoning_effort: None,
             temperature: Some(0.0),

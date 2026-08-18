@@ -165,6 +165,40 @@ export interface ConfigParams {
   active_effort: string | null;
   /** Built-in slash commands (name + description) sourced from core. */
   commands?: SlashCommand[];
+  /** Full editable configuration view (models). */
+  full?: ConfigView;
+  /** Absolute path of the main config file (read-only, determined by core). */
+  config_path?: string | null;
+  /** Absolute path of the standalone models file, if any (read-only). */
+  models_file?: string | null;
+}
+
+/** A model definition. Mirrors core `ModelConfig`; self-contained (provider +
+ *  URL + key). `provider` is one of `"deepseek"` | `"openai_compatible"`. */
+export interface ConfigModel {
+  /** Display identifier used in the selector and `active_model`. */
+  name: string;
+  /** Model id sent to the API (e.g. `deepseek-chat`, `deepseek-reasoner`). */
+  model_id: string;
+  /** Provider kind — `"deepseek"` | `"openai_compatible"`. */
+  provider: string;
+  /** Optional API base URL; omitted -> provider default. */
+  endpoint?: string | null;
+  /** Optional API key; omitted -> `{PROVIDER}_API_KEY` env. */
+  api_key?: string | null;
+  thinking?: string | null;
+  reasoning_effort?: string | null;
+  temperature?: number | null;
+  max_tokens?: number | null;
+  auto_compact_threshold?: number | null;
+}
+
+/** The editable configuration view sent to the settings panel and echoed back
+ *  on save. File paths are NOT part of this — they live on `ConfigParams`
+ *  (read-only) and are determined by core. */
+export interface ConfigView {
+  models: ConfigModel[];
+  active_model?: string | null;
 }
 
 /** A built-in slash command's metadata (mirrors `core::commands::SlashCommandInfo`). */
@@ -371,6 +405,7 @@ export interface RequestMethods {
   'session/undo': Record<string, never>;
   'session/cancel': Record<string, never>;
   'session/reconfigure': ReconfigureParams;
+  'config/update': { full: ConfigView };
   'session/delete': SessionDeleteParams;
   'session/rename': SessionRenameParams;
   'session/new': Record<string, never>;

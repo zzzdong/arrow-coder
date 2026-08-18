@@ -47,9 +47,30 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+        let method = req.method.clone();
+        let req_id = req.id.clone();
         let events = host.handle(req).await;
-        for ev in events {
-            host.emit(&ev).await;
+
+        // Emit the notifications the handler produced.
+        for ev in &events {
+            host.emit(ev).await;
+        }
+
+        // `config/update` is one of the rare methods the caller awaits a real
+        // response to; send it so the webview doesn't time out. Success when no
+        // error event was produced, otherwise relay the first error message.
+        if method == "config/update" {
+            let result = if let Some(err) = events.iter().find_map(|ev| match ev {
+                arrow_coder_vscode::Event::Error { error } => Some(error.clone()),
+                _ => None,
+            }) {
+                Err(err)
+            } else {
+                Ok(())
+            };
+            if let Some(id) = req_id {
+                host.emit_response(&id, result).await;
+            }
         }
     }
 

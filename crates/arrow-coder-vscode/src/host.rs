@@ -33,11 +33,12 @@ use arrow_coder_core::tools::{
 use tokio::sync::{broadcast, Mutex, oneshot};
 
 use crate::jsonrpc::{
-    ChatParams, ConfigPayload, DeleteSessionParams, Event, InitializeParams,
-    InjectParams, OpenSessionParams, PermissionRequestPayload,
-    PermissionResponseParams, ReconfigureParams, RenameSessionParams, Request,
-    RequiredPermissionPayload, SlashCommandPayload, SwitchWorkspaceParams,
-    UserAnswerParams, UserQuestionPayload, UsagePayload, WorkspaceStatePayload,
+    ChatParams, ConfigPayload, ConfigUpdateParams, ConfigViewPayload,
+    DeleteSessionParams, Event, InitializeParams, InjectParams, OpenSessionParams,
+    PermissionRequestPayload, PermissionResponseParams, ReconfigureParams,
+    RenameSessionParams, Request, RequiredPermissionPayload, SlashCommandPayload,
+    SwitchWorkspaceParams, UserAnswerParams, UserQuestionPayload, UsagePayload,
+    WorkspaceStatePayload,
 };
 use crate::workspace::WorkspaceIndex;
 
@@ -58,6 +59,11 @@ pub struct Host {
     out: Arc<AsyncMutex<Stdout>>,
     /// Resolved config (captured at `session/create` time).
     cfg: Option<VibeConfig>,
+    /// Absolute path of the main config file, if known — used by `config/update`
+    /// to persist changes.
+    config_path: Option<PathBuf>,
+    /// Absolute path of the standalone models file, if configured.
+    models_path: Option<PathBuf>,
     /// Pending model alias to switch to; applied on the next `session/prompt`.
     pending_model: Option<String>,
     /// Pending reasoning-effort override; applied on the next `session/prompt`.
@@ -97,6 +103,8 @@ impl Host {
             abort_tx: None,
             out: Arc::new(AsyncMutex::new(tokio::io::stdout())),
             cfg: None,
+            config_path: None,
+            models_path: None,
             pending_model: None,
             pending_effort: None,
             workspaces: Arc::new(Mutex::new(WorkspaceIndex::open(&sessions_dir))),
@@ -125,6 +133,35 @@ impl Host {
         .await
         {
             tracing::warn!("failed to write notification to stdout: {}", e);
+        }
+    }
+
+    /// Write a single JSON-RPC **response** line (matched by `id`) to stdout.
+    ///
+    /// Most requests are answered by notifications and never need this, but
+    /// `config/update` replies with a real response so the caller can await an
+    /// actual success/failure (instead of timing out).
+    pub async fn emit_response(&self, id: &serde_json::Value, result: Result<(), String>) {
+        let body = match result {
+            Ok(()) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": null }),
+            Err(error) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32603, "message": error },
+            }),
+        };
+        let mut out = self.out.lock().await;
+        let mut line = serde_json::to_string(&body).unwrap_or_else(|_| {
+            r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialize failed"}}"#.to_string()
+        });
+        line.push('\n');
+        if let Err(e) = async {
+            out.write_all(line.as_bytes()).await?;
+            out.flush().await
+        }
+        .await
+        {
+            tracing::warn!("failed to write response to stdout: {}", e);
         }
     }
 
@@ -207,6 +244,7 @@ impl Host {
             }
             "session/inject" => self.handle_inject(req.params).await,
             "session/reconfigure" => self.handle_reconfigure(req.params).await,
+            "config/update" => self.handle_config_update(req.params).await,
             "workspace/list" => vec![self.emit_workspace_state()],
             "workspace/switch" => self.handle_switch_workspace(req.params).await,
             "workspace/openSession" => self.handle_open_session(req.params).await,
@@ -548,6 +586,77 @@ impl Host {
         vec![self.emit_config()]
     }
 
+    /// Handle `config/update`: persist the full config view edited in the
+    /// webview settings panel back to the config file(s), refresh the in-memory
+    /// `cfg`, and re-emit `session/config` so the UI reflects the saved state.
+    async fn handle_config_update(&mut self, params: serde_json::Value) -> Vec<Event> {
+        let params: ConfigUpdateParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return vec![Event::Error {
+                    error: format!("invalid config/update params: {}", e),
+                }]
+            }
+        };
+        let full = params.full;
+
+        // A config file must be known to write back to.
+        let config_path = match &self.config_path {
+            Some(p) => p.clone(),
+            None => {
+                return vec![Event::Error {
+                    error: "no config file path available; cannot persist changes".to_string(),
+                }]
+            }
+        };
+
+        // Rebuild a VibeConfig from the edited view.
+        let mut cfg = self.cfg.clone().unwrap_or_default();
+        cfg.models = full.models;
+        cfg.active_model = full.active_model.or(cfg.active_model);
+
+        // Persist: models to the standalone models file (if configured), the
+        // rest to the main config file.
+        let models_path = self.models_path.clone();
+        if let Err(e) = cfg.save_split(&config_path, models_path.as_ref()) {
+            return vec![Event::Error {
+                error: format!("failed to save config: {}", e),
+            }];
+        }
+
+        // Reload so inline + standalone models merge consistently, then keep
+        // the resolved view in memory and refresh the UI.
+        let resolved = match VibeConfig::load(&config_path) {
+            Ok(c) => c,
+            Err(_) => cfg,
+        };
+        self.cfg = Some(resolved);
+        self.models_path = self
+            .cfg
+            .as_ref()
+            .and_then(|c| c.models_file.clone())
+            .map(|f| {
+                let p = std::path::Path::new(&f);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    config_path
+                        .parent()
+                        .map(|d| d.join(p))
+                        .unwrap_or_else(|| config_path.join(p))
+                }
+            })
+            .or(models_path);
+
+        tracing::info!(
+            config = %config_path.display(),
+            models = ?self.models_path.as_ref().map(|p| p.display().to_string()),
+            "config/update: persisted configuration"
+        );
+
+        vec![self.emit_config()]
+    }
+
     /// Apply any pending model/effort override to the live session's agent
     /// loop. Called immediately before a turn's `send`, so the change lands on
     /// exactly the next request without rebuilding the session.
@@ -604,14 +713,7 @@ impl Host {
         let models = cfg
             .models
             .iter()
-            .map(|m| {
-                let display = if m.alias.is_empty() {
-                    m.name.clone()
-                } else {
-                    m.alias.clone()
-                };
-                (m.name.clone(), display)
-            })
+            .map(|m| (m.name.clone(), m.model_id.clone()))
             .collect();
 
         Event::Config(ConfigPayload {
@@ -625,6 +727,12 @@ impl Host {
                     description: c.description.to_string(),
                 })
                 .collect(),
+            full: Some(ConfigViewPayload {
+                models: cfg.models.clone(),
+                active_model: cfg.active_model.clone(),
+            }),
+            config_path: self.config_path.as_ref().map(|p| p.display().to_string()),
+            models_file: self.models_path.as_ref().map(|p| p.display().to_string()),
         })
     }
 
@@ -967,6 +1075,18 @@ impl Host {
         // Retain the resolved config so `reconfigure`/`emit_config` can later
         // resolve model aliases and report the active selection.
         self.cfg = Some(config.clone());
+        // Remember where this config lives so `config/update` can write back.
+        self.config_path = VibeConfig::user_config_path();
+        self.models_path = config.models_file.as_ref().and_then(|f| {
+            let p = std::path::Path::new(f);
+            if p.is_absolute() {
+                Some(p.to_path_buf())
+            } else {
+                // Resolve relative to the main config file's directory.
+                VibeConfig::user_config_path()
+                    .and_then(|base| base.parent().map(|d| d.join(p)))
+            }
+        });
 
         let working_dir: PathBuf = params
             .cwd
@@ -985,15 +1105,11 @@ impl Host {
                 "No active model configured. Set 'active_model' in your config file.".to_string(),
             ))?;
 
-        let provider_config: ProviderConfig = config
-            .providers
-            .iter()
-            .find(|p| p.name == model_config.provider)
-            .cloned()
-            .ok_or_else(|| arrow_coder_core::core::ArrowError::Config(format!(
-                "Provider '{}' not found for model '{}'.",
-                model_config.provider, model_config.name
-            )))?;
+        // Resolve the runtime backend config: model -> endpoint -> provider
+        // family. This supports multiple endpoints per protocol family (e.g.
+        // several official-API DeepSeek endpoints, each with its own model id
+        // and API key) as well as legacy single-provider configs.
+        let provider_config: ProviderConfig = config.resolve_provider(&model_config)?;
 
         let backend: Arc<dyn BackendLike> = init_backend(&provider_config).await?;
         tracing::debug!("build_session: backend initialized (provider={})", provider_config.name);

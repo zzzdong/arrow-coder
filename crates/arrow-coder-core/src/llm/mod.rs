@@ -21,7 +21,10 @@ use std::sync::Arc;
 pub fn init_backend(
     provider_config: &ProviderConfig,
 ) -> Result<Arc<dyn BackendLike>, crate::core::ArrowError> {
-    match provider_config.backend.as_str() {
+    // `kind` is the modern field; `backend` is the deprecated alias. Resolve
+    // either so pre-refactor configs keep working.
+    let kind = provider_config.kind();
+    match kind {
         "openai" | "openai-compatible" => {
             let backend = openai::OpenAIBackend::new(provider_config.clone())?;
             Ok(Arc::new(backend))

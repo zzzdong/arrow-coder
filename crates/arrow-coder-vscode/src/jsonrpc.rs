@@ -15,6 +15,8 @@
 //! ```
 //! Method names follow `docs/refactor-plan.md` §7.
 
+use arrow_coder_core::core::config::ModelConfig;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -22,6 +24,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
     pub method: String,
+    /// JSON-RPC request id, echoed back in responses (used by `config/update`
+    /// so the caller can await an actual result). Most methods ignore it.
+    #[serde(default)]
+    pub id: Option<Value>,
     #[serde(default)]
     pub params: Value,
 }
@@ -393,7 +399,10 @@ pub struct ReconfigureParams {
 }
 
 /// Response payload for a `config` event: the list of models the user can
-/// switch between, plus the currently-active selection.
+/// switch between, plus the currently-active selection, plus the full
+/// editable configuration view (providers/endpoints/models) the settings UI
+/// renders. The full view is re-emitted on `config/update` so the panel stays
+/// in sync after a save.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigPayload {
     /// All selectable models: `(alias, display_name)`.
@@ -407,6 +416,40 @@ pub struct ConfigPayload {
     /// the CLI and the core.
     #[serde(default)]
     pub commands: Vec<SlashCommandPayload>,
+    /// Full editable configuration view for the settings panel.
+    #[serde(default)]
+    pub full: Option<ConfigViewPayload>,
+    /// Absolute path of the main config file (read-only, determined by core).
+    #[serde(default)]
+    pub config_path: Option<String>,
+    /// Absolute path of the standalone models file, if any (read-only).
+    #[serde(default)]
+    pub models_file: Option<String>,
+}
+
+/// The full configuration view sent to the webview settings panel and echoed
+/// back in `config/update`. Round-trips the config structures directly so the
+/// editor can add/remove models and tweak model details without touching TOML
+/// by hand.
+///
+/// Only **editable** config is round-tripped. File paths are not part of this
+/// view — they are determined by the core (`user_config_path` + the models
+/// file) and surfaced read-only on [`ConfigPayload`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigViewPayload {
+    /// Full model definitions (self-contained: provider + URL + key).
+    pub models: Vec<ModelConfig>,
+    /// Currently active model name.
+    #[serde(default)]
+    pub active_model: Option<String>,
+}
+
+/// Params for the `config/update` request: the full config view as edited in
+/// the settings panel. The host writes it back to the config file(s) and
+/// re-emits `session/config` so the running UI reflects the saved state.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigUpdateParams {
+    pub full: ConfigViewPayload,
 }
 
 /// A built-in slash command's metadata (mirrors `core::commands::SlashCommandInfo`).

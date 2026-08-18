@@ -24,12 +24,17 @@ import TodoPanel from './components/TodoPanel.vue';
 import PermissionPrompt from './components/PermissionPrompt.vue';
 import UserQuestionPrompt from './components/UserQuestionPrompt.vue';
 import UsageBar from './components/UsageBar.vue';
+import ModelSettings from './components/ModelSettings.vue';
 
 const store = useChatStore();
 
 const showHistory = ref(false);
 function toggleHistory() {
   showHistory.value = !showHistory.value;
+}
+const showSettings = ref(false);
+function toggleSettings() {
+  showSettings.value = !showSettings.value;
 }
 
 function newSession() {
@@ -144,8 +149,8 @@ onMounted(() => {
     <FileChangesPanel />
     <!-- Agent todo list / plan panel (manual cancel & trigger) -->
     <TodoPanel />
-    <!-- Input toolbar (辅助输入: @提及 / 附件 / Skills / 模型) sits directly above the composer -->
-    <Toolbar />
+    <!-- Input toolbar (辅助输入: @提及 / 附件 / Skills / 模型 / 配置) sits directly above the composer -->
+    <Toolbar @settings="showSettings = true" />
     <!-- Input area with action bar (includes the in-bar ContextMeter) -->
     <Composer />
     <!-- Session-wide token usage + cache-hit rate (harness-style cumulative) -->
@@ -167,6 +172,8 @@ onMounted(() => {
         <WorkspaceTree @navigated="showHistory = false" />
       </div>
     </div>
+
+    <ModelSettings v-if="showSettings" @close="showSettings = false" />
   </div>
 </template>
 

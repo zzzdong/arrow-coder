@@ -3,6 +3,7 @@ import { rpc } from '../rpc';
 import { ensureClosedFences } from '../markdown';
 import type {
   ConfigParams,
+  ConfigView,
   FileChangesParams,
   PermissionRequestParams,
   UserQuestionParams,
@@ -754,6 +755,18 @@ export const useChatStore = defineStore('chat', {
           reasoning_effort: effort || null,
         })
         .catch(() => {});
+    },
+    /** Persist the full configuration view edited in the settings panel. The
+     *  host writes it back to disk and re-emits `session/config`; that
+     *  notification refreshes `this.config` (including `full`). Returns the
+     *  error string on failure, or null on success. */
+    async saveConfig(full: ConfigView): Promise<string | null> {
+      try {
+        await rpc.request('config/update', { full });
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
     },
     /** Update file changes from the most recent turn. */
     setFileChanges(p: FileChangesParams) {

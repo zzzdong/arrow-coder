@@ -156,13 +156,12 @@ async fn show_config() -> Result<()> {
     println!("  ArrowCode Home: {}", arrowcode_home);
     println!("  Active Model: {:?}", config.active_model);
     println!("  Default Agent: {}", config.default_agent);
-    println!("\nProviders:");
-    for provider in &config.providers {
-        println!("  - {} ({})", provider.name, provider.backend);
-    }
     println!("\nModels:");
     for model in &config.models {
-        println!("  - {} ({})", model.name, model.provider);
+        println!(
+            "  - {} (model_id: {}, provider: {})",
+            model.name, model.model_id, model.provider
+        );
     }
     println!("\nSkill Paths:");
     for path in &config.skill_paths {
@@ -178,14 +177,14 @@ async fn list_models() -> Result<()> {
 
     println!("Available Models:");
     for model in &config.models {
-        let marker = if Some(&model.alias) == config.active_model.as_ref() {
+        let marker = if Some(&model.name) == config.active_model.as_ref() {
             "*"
         } else {
             " "
         };
         println!(
-            "{} {} ({}) - {}",
-            marker, model.alias, model.name, model.provider
+            "{} {} (model_id: {}, provider: {})",
+            marker, model.name, model.model_id, model.provider
         );
     }
 
@@ -211,15 +210,8 @@ async fn run_programmatic_mode(
             "No active model configured. Please set 'active_model' in your config file.".to_string()
         ))?;
 
-    let provider_config = config
-        .providers
-        .iter()
-        .find(|p| p.name == model_config.provider)
-        .cloned()
-        .ok_or_else(|| ArrowError::Config(
-            format!("Provider '{}' not found for model '{}'. Please configure the provider in your config file.",
-                model_config.provider, model_config.name)
-        ))?;
+    // Resolve the runtime backend config: model -> endpoint -> provider family.
+    let provider_config = config.resolve_provider(&model_config)?;
 
     // Initialize backend
     let backend = arrow_coder_core::llm::init_backend(&provider_config)?;
@@ -371,15 +363,8 @@ async fn run_interactive_mode(
             "No active model configured. Please set 'active_model' in your config file.".to_string()
         ))?;
 
-    let provider_config = config
-        .providers
-        .iter()
-        .find(|p| p.name == model_config.provider)
-        .cloned()
-        .ok_or_else(|| ArrowError::Config(
-            format!("Provider '{}' not found for model '{}'. Please configure the provider in your config file.",
-                model_config.provider, model_config.name)
-        ))?;
+    // Resolve the runtime backend config: model -> endpoint -> provider family.
+    let provider_config = config.resolve_provider(&model_config)?;
 
     // Initialize backend
     let backend = arrow_coder_core::llm::init_backend(&provider_config)?;
