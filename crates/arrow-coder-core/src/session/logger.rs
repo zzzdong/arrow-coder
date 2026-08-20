@@ -152,6 +152,40 @@ impl SessionLogger {
         Ok(())
     }
 
+    /// Persist the model this session is using. Written into `metadata.json`
+    /// (alongside the existing `session_id`/`start_time`/`stats`) so that a
+    /// resumed session can restore its own model selection.
+    pub fn save_model(&self, model_name: &str) -> crate::core::Result<()> {
+        if !self.config.enabled || self.session_dir.is_none() {
+            return Ok(());
+        }
+        let filepath = self.session_dir.as_ref().unwrap().join(Self::METADATA_FILENAME);
+
+        // Read the existing metadata to preserve other fields, then overlay `model`.
+        let mut json = if filepath.exists() {
+            fs::read_to_string(&filepath)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("model".to_string(), serde_json::Value::String(model_name.to_string()));
+        }
+        fs::write(filepath, serde_json::to_string_pretty(&json)?)?;
+        Ok(())
+    }
+
+    /// Read the model name persisted for this session, if any.
+    pub fn load_model(&self) -> Option<String> {
+        let dir = self.session_dir.as_ref()?;
+        let metadata_path = dir.join(Self::METADATA_FILENAME);
+        let content = fs::read_to_string(metadata_path).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+        value.get("model").and_then(|v| v.as_str()).map(|s| s.to_string())
+    }
+
     /// Load messages from disk
     pub fn load_messages(&self) -> crate::core::Result<Vec<LLMMessage>> {
         if !self.config.enabled || self.session_dir.is_none() {

@@ -19,6 +19,12 @@ use std::path::PathBuf;
 use std::future::Future;
 use std::pin::Pin;
 
+/// How many times to retry a streaming request after the upstream stream is cut
+/// before a clean terminator (reverse-proxy idle-timeout / batched-token
+/// overflow). Each retry degrades the request surface so a regeneration can fit
+/// inside the proxy's time window.
+const MAX_STREAM_RETRIES: u32 = 3;
+
 /// Callback type for permission confirmation
 /// Returns (ApprovalResponse, feedback, ApprovalType)
 pub type PermissionConfirmCallback = Arc<
@@ -513,6 +519,41 @@ impl AgentLoop {
         let _ = self.event_tx.send(crate::core::BaseEvent::Todo(crate::core::TodoEvent { todos }));
     }
 
+    /// Compute a safe `max_tokens` for the next completion, so the model's
+    /// output cannot overflow the configured context window (and thus the
+    /// serving backend's `--max-model-len`, which cuts the connection on
+    /// overflow).
+    ///
+    /// `requested` is `model.max_tokens` (the model's preferred output ceiling);
+    /// `used_tokens` is the *estimated* token count of the current prompt —
+    /// including tools, which also consume prompt budget on the wire. Because
+    /// [`estimate_tokens`] is a deliberate lower-bound heuristic (it runs low
+    /// for CJK/JSON), we apply a **generous** safety margin (max 5% of the
+    /// window, floor 256) so that even a moderately under-counted prompt still
+    /// stays under the real limit. The requested value is clamped to the
+    /// remaining budget; when nothing is left we floor at 1 so a degenerate
+    /// (already-full) context still yields a tiny valid request rather than a
+    /// malformed one.
+    fn effective_max_tokens(
+        &self,
+        requested: Option<u32>,
+        used_tokens: u64,
+    ) -> Option<u32> {
+        let window = self.config.max_session_tokens.unwrap_or(128_000);
+        // Cover the tokenizer under-count and per-request overhead: at least
+        // 256 tokens, scaled to 5% of the window (e.g. ~6.5k @ 128k) for long
+        // contexts where the heuristic error compounds.
+        let safety_margin = (window / 20).max(256);
+        let remaining = window
+            .saturating_sub(used_tokens)
+            .saturating_sub(safety_margin);
+        let cap = remaining.max(1);
+        match requested {
+            Some(r) => Some((r as u64).min(cap) as u32),
+            None => Some(cap as u32),
+        }
+    }
+
     /// Broadcast a session-wide usage snapshot. Called after every LLM call (so
     /// the UI updates live) and again when a turn completes. Includes the
     /// elapsed turn duration in milliseconds.
@@ -910,6 +951,19 @@ impl AgentLoop {
     /// rebuilding the session or clearing context.
     pub fn set_model(&mut self, model: crate::core::ModelConfig) {
         self.model = Some(model);
+    }
+
+    /// Replace the backend in place. Used together with [`Self::set_model`] to
+    /// point an existing session at a different endpoint/provider (e.g. a
+    /// self-contained model with its own `endpoint` / `api_key`) without
+    /// rebuilding the session or clearing context.
+    pub fn set_backend(&mut self, backend: Arc<dyn BackendLike>) {
+        self.backend = Some(backend);
+    }
+
+    /// The currently configured model (if any).
+    pub fn model(&self) -> Option<&crate::core::ModelConfig> {
+        self.model.as_ref()
     }
 
     /// Override only the reasoning effort of the current model (e.g. switch
@@ -1457,13 +1511,30 @@ impl AgentLoop {
             // under `agent_loop.llm_request`).
             tracing::debug!(target: "agent_loop", "Calling LLM API with {} messages", backend_messages.len());
 
+            // Clamp `max_tokens` so the output cannot overflow the context
+            // window / the serving backend's --max-model-len. Include the tools'
+            // token cost (they consume prompt budget on the wire).
+            let mut used_tokens: u64 = backend_messages
+                .iter()
+                .map(|m| estimate_tokens(m.content.as_deref().unwrap_or("")))
+                .sum();
+            if !available_tools.is_empty() {
+                used_tokens += estimate_tokens(
+                    &available_tools
+                        .iter()
+                        .map(|t| format!("{}{}", t.function.name, t.function.description))
+                        .collect::<String>(),
+                );
+            }
+            let max_tokens = self.effective_max_tokens(model.max_tokens, used_tokens);
+
             let llm_result = backend
                 .complete(
                     &model,
                     &backend_messages,
                     model.temperature.unwrap_or(0.2),
                     if available_tools.is_empty() { None } else { Some(&available_tools) },
-                    model.max_tokens.map(|t| t as u32),
+                    max_tokens,
                     Some(ToolChoice::Auto),
                     None,
                 )
@@ -2141,6 +2212,16 @@ impl AgentLoop {
             "Using model configuration for streaming"
         );
 
+        // Business-level stream retry state. If the upstream SSE stream is cut
+        // before a clean terminator (e.g. a reverse-proxy idle-timeout), we
+        // retry the request — progressively degrading reasoning_effort and
+        // max_tokens so the regeneration fits inside the proxy's window. The
+        // partial content/reasoning of the interrupted attempt is NOT carried
+        // over (the model rethinks from scratch); only the request surface is
+        // softened.
+        let mut request_model = model.clone();
+        let mut stream_retries: u32 = 0;
+
         // Main agent loop with streaming
         loop {
             // Honor an external stop request before each LLM call. Mirrors
@@ -2217,13 +2298,29 @@ impl AgentLoop {
             tracing::info!(target: "agent_loop", "Calling LLM streaming API with {} messages", backend_messages.len());
 
             // Use streaming API
+            // Clamp `max_tokens` so the output cannot overflow the context
+            // window / the serving backend's --max-model-len. Include tools.
+            let mut used_tokens: u64 = backend_messages
+                .iter()
+                .map(|m| estimate_tokens(m.content.as_deref().unwrap_or("")))
+                .sum();
+            if !available_tools.is_empty() {
+                used_tokens += estimate_tokens(
+                    &available_tools
+                        .iter()
+                        .map(|t| format!("{}{}", t.function.name, t.function.description))
+                        .collect::<String>(),
+                );
+            }
+            let max_tokens = self.effective_max_tokens(request_model.max_tokens, used_tokens);
+
             let stream = backend
                 .complete_streaming(
-                    &model,
+                    &request_model,
                     &backend_messages,
-                    model.temperature.unwrap_or(0.2),
+                    request_model.temperature.unwrap_or(0.2),
                     if available_tools.is_empty() { None } else { Some(&available_tools) },
-                    model.max_tokens.map(|t| t as u32),
+                    max_tokens,
                     Some(ToolChoice::Auto),
                     None,
                 )
@@ -2245,6 +2342,10 @@ impl AgentLoop {
             let mut accumulated_tool_calls: Vec<crate::core::ToolCall> = Vec::new();
             let mut usage = None;
             let mut finish_reason: Option<String> = None;
+            // Set when the backend signals the upstream stream was cut before a
+            // clean terminator (proxy idle-timeout / batched-token overflow). The
+            // accumulated content/reasoning may be incomplete; we retry below.
+            let mut stream_interrupted = false;
 
             // Pin the stream for polling
             let mut stream = Pin::from(stream);
@@ -2259,7 +2360,15 @@ impl AgentLoop {
                     break;
                 }
                 match chunk_result {
-                    Ok(LLMChunk { message, usage: u, finish_reason: fr, .. }) => {
+                    Ok(chunk) => {
+                        if chunk.stream_interrupted {
+                            // Terminal sentinel: the transport was cut. Stop
+                            // consuming (the partial content is discarded on
+                            // retry) and let the retry logic below fire.
+                            stream_interrupted = true;
+                            break;
+                        }
+                        let LLMChunk { message, usage: u, finish_reason: fr, .. } = chunk;
                         if fr.is_some() {
                             finish_reason = fr;
                         }
@@ -2375,6 +2484,60 @@ impl AgentLoop {
                 tool_call_count = accumulated_tool_calls.len(),
                 "Received streaming LLM response"
             );
+
+            // Stream was interrupted before a clean terminator (reverse-proxy
+            // idle-timeout / serving-backend batched-token overflow). How we
+            // proceed depends on what survived the cut:
+            //
+            // 1. A complete set of tool calls was already assembled → treat them
+            //    as valid and execute them (the tool results feed the next turn,
+            //    which is exactly "continuing this turn"). Nothing is discarded.
+            //
+            // 2. The cut hit mid-content/mid-reasoning (or left tool calls
+            //    incomplete) → retry. The retry re-sends the full history that
+            //    was committed BEFORE this interrupted attempt (`self.messages()`
+            //    never received the partial reply, because it is only pushed on a
+            //    clean finish), so the model continues from the last committed
+            //    turn rather than from scratch. The interrupted attempt's partial
+            //    reasoning/content is intentionally NOT echoed back. To give the
+            //    regeneration a better chance of finishing inside the proxy's
+            //    window, the request surface is degraded (lower reasoning_effort,
+            //    smaller max_tokens).
+            if stream_interrupted {
+                let tool_calls_complete = has_tool_calls
+                    && !accumulated_tool_calls.is_empty()
+                    && accumulated_tool_calls.iter().all(|tc| {
+                        !tc.function.name.is_empty()
+                            && !tc.function.arguments.trim().is_empty()
+                            && serde_json::from_str::<serde_json::Value>(&tc.function.arguments).is_ok()
+                    });
+
+                if tool_calls_complete {
+                    tracing::warn!(target: "agent_loop",
+                        tool_call_count = accumulated_tool_calls.len(),
+                        "Stream interrupted but a complete set of tool calls was assembled; \
+                         executing them to continue the turn"
+                    );
+                    // Fall through to the tool-call handling branch below.
+                } else if stream_retries < MAX_STREAM_RETRIES && !self.abort_requested() {
+                    stream_retries += 1;
+                    request_model = degrade_request(&request_model, stream_retries);
+                    tracing::warn!(target: "agent_loop",
+                        attempt = stream_retries,
+                        max_retries = MAX_STREAM_RETRIES,
+                        reasoning_effort = ?request_model.reasoning_effort,
+                        max_tokens = ?request_model.max_tokens,
+                        "Stream interrupted mid-output; retrying from committed history \
+                         with degraded request surface"
+                    );
+                    continue;
+                } else {
+                    return Err(format!(
+                        "Stream interrupted {} time(s) without a complete response; giving up.",
+                        stream_retries
+                    ));
+                }
+            }
 
             // Handle tool calls if present.
             if has_tool_calls && !accumulated_tool_calls.is_empty() {                // Create assistant message with tool calls
@@ -2874,6 +3037,44 @@ fn llm_message_to_events(message: &LLMMessage) -> Vec<crate::session::SessionEve
     }
 }
 
+/// Produce a degraded clone of `model` for a stream retry. `attempt` is the
+/// 1-based retry index. We ease `reasoning_effort` (so a long thinking phase
+/// finishes faster and no longer blows the proxy's idle-timeout) and shrink
+/// `max_tokens` (so the total generation fits inside the proxy's time window).
+/// The original `ModelConfig` is left untouched — only the request surface for
+/// this one retry is softened.
+fn degrade_request(model: &crate::core::config::ModelConfig, attempt: u32) -> crate::core::config::ModelConfig {
+    let mut m = model.clone();
+    // Reasoning effort ladder: non-standard/extreme -> high -> medium -> low.
+    // Providers each have their own vocabularies; we only step DOWN through the
+    // set we know and leave unknown values untouched.
+    const EFFORT_LADDER: &[&str] = &["low", "medium", "high"];
+    if let Some(ref effort) = m.reasoning_effort {
+        let cur = effort.trim().to_ascii_lowercase();
+        // Map an extreme/unknown strong value to the top of the ladder first.
+        let cur_idx = if EFFORT_LADDER.contains(&cur.as_str()) {
+            EFFORT_LADDER.iter().position(|e| *e == cur).unwrap()
+        } else {
+            2 // treat any non-standard strong value (xhigh/max/…) as `high`
+        };
+        // attempt is 1-based; the first retry keeps the top strength (so an
+        // extreme value like `xhigh` maps to `high` on the first step), then
+        // each further retry drops one more level (high -> medium -> low).
+        let next_idx = (cur_idx as i32 - (attempt as i32 - 1)).max(0) as usize;
+        let next = EFFORT_LADDER[next_idx];
+        // Only overwrite when we actually stepped down (preserve provider
+        // custom values like `xhigh` on the first retry that maps to `high`).
+        m.reasoning_effort = Some(next.to_string());
+    }
+    // Shrink the output budget: halve per retry (compounding), floor at a
+    // small usable value.
+    if let Some(mt) = m.max_tokens {
+        let reduced = (mt as u64 / 2).max(512) as u32;
+        m.max_tokens = Some(reduced);
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3205,11 +3406,8 @@ mod tests {
             name: "mock".into(),
             provider: "mock".into(),
             alias: "mock".into(),
-            thinking: None,
-            reasoning_effort: None,
             temperature: Some(0.0),
-            max_tokens: None,
-            auto_compact_threshold: None,
+            ..Default::default()
         };
         let mut a = agent().with_model(model).with_tools(vec![Arc::new(EchoTool)]);
 
@@ -3349,6 +3547,97 @@ mod tests {
         // Guard the documented minimal-mode contract so a refactor can't
         // quietly shrink/grow the priming set.
         assert_eq!(AgentLoop::MINIMAL_TOOLS, &["bash", "str_replace_editor"]);
+    }
+
+    #[test]
+    fn test_effective_max_tokens_clamps_to_context_window() {
+        let mut a = agent();
+        // 100k window -> safety margin = max(100000/20, 256) = 5000.
+        a.config.max_session_tokens = Some(100_000);
+        a.config.auto_compact_threshold = None;
+
+        // used 95000: 100000 - 95000 - 5000 = 0 -> floor at 1 (never exceed).
+        let capped = a.effective_max_tokens(Some(4096), 95_000).unwrap();
+        assert!(capped <= (100_000 - 95_000), "must not exceed remaining window");
+
+        // used 1000: plenty of headroom (94000) -> requested 4096 kept.
+        let ok = a.effective_max_tokens(Some(4096), 1_000).unwrap();
+        assert_eq!(ok, 4096);
+
+        // No requested max -> still capped by remaining space.
+        let no_req = a.effective_max_tokens(None, 95_000).unwrap();
+        assert!(no_req <= (100_000 - 95_000));
+
+        // Degenerate: context already full -> floor at 1 (still a valid request).
+        let full = a.effective_max_tokens(Some(4096), 100_000).unwrap();
+        assert_eq!(full, 1);
+
+        // A larger window keeps a proportional margin: 128k -> margin 6400.
+        a.config.max_session_tokens = Some(128_000);
+        let m = a.effective_max_tokens(None, 60_000).unwrap();
+        assert_eq!(m, 128_000 - 60_000 - 6_400);
+    }
+
+    // --- Stream-interruption retry helpers ---------------------------------
+
+    #[test]
+    fn test_degrade_request_steps_down_reasoning_effort() {
+        use crate::core::config::ModelConfig;
+
+        let base = ModelConfig {
+            name: "qwen3.8".into(),
+            provider: "qwen".into(),
+            reasoning_effort: Some("xhigh".into()),
+            max_tokens: Some(8192),
+            ..Default::default()
+        };
+
+        // xhigh (treated as `high`) -> high -> medium -> low over 3 attempts.
+        let r1 = degrade_request(&base, 1);
+        assert_eq!(r1.reasoning_effort.as_deref(), Some("high"));
+        let r2 = degrade_request(&r1, 2);
+        assert_eq!(r2.reasoning_effort.as_deref(), Some("medium"));
+        let r3 = degrade_request(&r2, 3);
+        assert_eq!(r3.reasoning_effort.as_deref(), Some("low"));
+        // Floors at low even with more attempts.
+        let r4 = degrade_request(&r3, 4);
+        assert_eq!(r4.reasoning_effort.as_deref(), Some("low"));
+
+        // max_tokens halves each attempt and never drops below the floor.
+        assert_eq!(r1.max_tokens, Some(4096));
+        assert_eq!(r2.max_tokens, Some(2048));
+        assert_eq!(r4.max_tokens, Some(512));
+
+        // Original config is untouched.
+        assert_eq!(base.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(base.max_tokens, Some(8192));
+    }
+
+    #[test]
+    fn test_degrade_request_no_effort_leaves_config_alone() {
+        use crate::core::config::ModelConfig;
+
+        let base = ModelConfig {
+            name: "plain".into(),
+            provider: "openai".into(),
+            reasoning_effort: None,
+            max_tokens: Some(2048),
+            ..Default::default()
+        };
+        let r = degrade_request(&base, 1);
+        assert_eq!(r.reasoning_effort, None);
+        assert_eq!(r.max_tokens, Some(1024));
+    }
+
+    #[test]
+    fn test_interrupted_sentinel_flag() {
+        use crate::core::LLMChunk;
+        let c = LLMChunk::interrupted();
+        assert!(c.stream_interrupted);
+        assert_eq!(c.finish_reason.as_deref(), Some("stream_interrupted"));
+        // A normal chunk must NOT be flagged.
+        let normal = LLMChunk::new(crate::core::LLMMessage::assistant("hi"), None);
+        assert!(!normal.stream_interrupted);
     }
 }
 

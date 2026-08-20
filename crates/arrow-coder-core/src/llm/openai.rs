@@ -4,7 +4,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
 
 use crate::core::{
     AvailableTool, FunctionCall, LLMChunk, LLMMessage, LLMUsage, Role, ToolCall, ToolChoice,
@@ -19,32 +18,30 @@ struct OpenAIRequest {
     messages: Vec<OpenAIMessage>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// OpenAI-standard reasoning effort (`low` | `medium` | `high`) for
+    /// reasoning models (gpt-5 / o3 / o4-mini). Passed through verbatim from
+    /// `model.reasoning_effort`; validation is left to the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
-    // DeepSeek-specific top-level fields (NOT under extra_body).
-    // `thinking` enables/disables the reasoning chain (DeepSeek-V3.2+).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<ThinkingConfig>,
-    // `reasoning_effort` ('low'|'medium'|'high') tunes reasoning depth.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct StreamOptions {
     include_usage: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct ThinkingConfig {
-    #[serde(rename = "type")]
-    thinking_type: String, // "enabled" | "disabled"
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +118,32 @@ struct OpenAIUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
     total_tokens: u32,
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAIPromptTokensDetails>,
+}
+
+/// Detailed prompt-side token breakdown (OpenAI-compatible
+/// `prompt_tokens_details`). `cached_tokens` is what lets us compute the prompt
+/// cache hit rate.
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAIPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
+}
+
+impl OpenAIUsage {
+    fn to_llm_usage(&self) -> LLMUsage {
+        LLMUsage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            total_tokens: Some(self.total_tokens),
+            cache_hit_tokens: self
+                .prompt_tokens_details
+                .as_ref()
+                .map(|d| d.cached_tokens),
+            reasoning_tokens: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +154,10 @@ struct OpenAIStreamChunk {
     created: u64,
     model: String,
     choices: Vec<OpenAIStreamChoice>,
+    /// The final chunk (with `include_usage=true`) carries the usage totals even
+    /// when `choices` is empty.
+    #[serde(default)]
+    usage: Option<OpenAIUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,7 +173,22 @@ struct OpenAIDelta {
     role: Option<String>,
     content: Option<String>,
     tool_calls: Option<Vec<OpenAIToolCall>>,
+    // DeepSeek / OpenAI reasoning streams use `reasoning_content`.
     reasoning_content: Option<String>,
+    // Qwen / vLLM thinking streams use `reasoning` (without `_content`).
+    reasoning: Option<String>,
+}
+
+impl OpenAIDelta {
+    /// The combined reasoning (thinking) text, regardless of which field the
+    /// provider uses (`reasoning_content` vs `reasoning`).
+    fn reasoning_text(&self) -> Option<&str> {
+        match (&self.reasoning_content, &self.reasoning) {
+            (Some(a), _) if !a.is_empty() => Some(a.as_str()),
+            (_, Some(b)) if !b.is_empty() => Some(b.as_str()),
+            _ => self.reasoning_content.as_deref().or(self.reasoning.as_deref()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -166,9 +208,7 @@ impl OpenAIBackend {
                 )
             ))?;
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()?;
+        let client = crate::llm::build_client(provider.verify_tls)?;
 
         Ok(Self {
             client,
@@ -270,11 +310,7 @@ impl OpenAIBackend {
         })?;
 
         let message = self.convert_openai_message(choice.message)?;
-        let usage = response.usage.map(|u| LLMUsage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            ..Default::default()
-        });
+        let usage = response.usage.map(|u| u.to_llm_usage());
 
         Ok(LLMChunk::new(message, usage))
     }
@@ -320,6 +356,11 @@ impl OpenAIBackend {
             None => return Ok(None),
         };
 
+        // Extract reasoning (thinking) before moving the individual fields, and
+        // normalize across the `reasoning_content` (DeepSeek/OpenAI) and
+        // `reasoning` (Qwen/vLLM) field names used by OpenAI-compatible providers.
+        let reasoning_content = delta.reasoning_text().map(|s| s.to_string());
+
         let msg = LLMMessage {
             role: match delta.role.as_deref() {
                 Some("assistant") => Role::Assistant,
@@ -328,8 +369,7 @@ impl OpenAIBackend {
             content: delta.content,
             images: None,
             injected: None,
-            // Preserve reasoning_content from streaming response (DeepSeek V4 support)
-            reasoning_content: delta.reasoning_content,
+            reasoning_content,
             reasoning_state: None,
             reasoning_signature: None,
             reasoning_message_id: None,
@@ -355,31 +395,13 @@ impl OpenAIBackend {
         Ok(Some(LLMChunk::new(msg, None)))
     }
 
-    /// Normalize a DeepSeek reasoning_effort value to the canonical wire
-    /// enum. DeepSeek only accepts `low` | `high` | `max` on the wire; some
-    /// user-facing presets collapse onto `high` (matching the official docs):
-    ///   medium -> high, xhigh -> high, high -> high.
-    fn normalize_effort(effort: &str) -> Option<&'static str> {
-        match effort.to_ascii_lowercase().as_str() {
-            "low" => Some("low"),
-            "medium" | "xhigh" | "high" => Some("high"),
-            "max" => Some("max"),
-            _ => None,
-        }
-    }
-
-    /// Build the wire request, applying provider-specific discipline:
-    /// - `thinking` (DeepSeek-V3.2+) -> top-level `{type:"enabled"|"disabled"}`.
-    ///   `model.thinking` accepts both a switch (enabled/disabled/auto) and a
-    ///   preset effort (low/medium/high/xhigh/max); the latter enables thinking
-    ///   and maps to `reasoning_effort` (DeepSeek supports multi-tier effort:
-    ///   low < high < max, with medium/xhigh collapsing to high).
-    /// - When thinking is enabled, DeepSeek ignores `temperature`; we still
-    ///   forward it (harmless) but log a debug note.
+    /// Build the wire request.
+    ///
     /// - stream always carries `stream_options.include_usage=true` so token
-    ///   usage is returned (harness discipline: usage is never dropped).
-    /// - Optional fields are only emitted when present (`skip_serializing_if`),
-    ///   so we never put a literal `null` on the wire.
+    ///   usage is returned (usage is never dropped).
+    /// - Optional fields (top_p / top_k / presence_penalty / tools / max_tokens)
+    ///   are only emitted when present (`skip_serializing_if`), so we never put a
+    ///   literal `null` on the wire.
     fn build_request(
         &self,
         model: &ModelConfig,
@@ -390,70 +412,29 @@ impl OpenAIBackend {
         tool_choice: Option<ToolChoice>,
         stream: bool,
     ) -> OpenAIRequest {
-        // Resolve the thinking switch + reasoning effort from `model.thinking`
-        // and `model.reasoning_effort`.
-        let mut thinking_enabled = false;
-        let mut effort: Option<String> = None;
-
-        let thinking_lc = model.thinking.as_deref().map(|s| s.to_ascii_lowercase());
-        match thinking_lc.as_deref() {
-            // Explicit switch: off.
-            Some("disabled") | Some("false") | Some("off") => {
-                thinking_enabled = false;
-            }
-            // Explicit switch: on (effort comes from reasoning_effort or default).
-            Some("enabled") | Some("true") | Some("on") | Some("auto") => {
-                thinking_enabled = true;
-                effort = model
-                    .reasoning_effort
-                    .as_deref()
-                    .and_then(Self::normalize_effort)
-                    .map(|s| s.to_string())
-                    .or_else(|| Some("high".to_string())); // DeepSeek default effort
-            }
-            // Preset effort directly in `thinking` (e.g. "high", "medium", "max").
-            Some(v @ ("low" | "medium" | "high" | "xhigh" | "max")) => {
-                thinking_enabled = true;
-                effort = Self::normalize_effort(v).map(|s| s.to_string());
-            }
-            // Unknown / unset -> let the provider decide (omit the field).
-            _ => {}
-        }
-
-        let thinking = if thinking_enabled {
-            Some(ThinkingConfig { thinking_type: "enabled".to_string() })
-        } else if matches!(
-            thinking_lc.as_deref(),
-            Some("disabled") | Some("false") | Some("off")
-        ) {
-            Some(ThinkingConfig { thinking_type: "disabled".to_string() })
-        } else {
-            None
-        };
-
-        if thinking_enabled {
-            tracing::debug!(
-                target: "llm.openai",
-                "thinking enabled (effort={:?}); DeepSeek ignores `temperature` in thinking mode",
-                effort
-            );
-        }
-
         OpenAIRequest {
-            model: model.name.clone(),
+            model: model.model_id().to_string(),
             messages: self.convert_messages(messages),
             temperature,
+            // Optional sampling parameters from the model config; only emitted
+            // when configured (never a literal `null` on the wire).
+            top_p: model.top_p,
+            top_k: model.top_k,
+            presence_penalty: model.presence_penalty,
             tools: tools.map(|t| self.convert_tools(t)),
             tool_choice: self.convert_tool_choice(tool_choice.as_ref()),
             max_tokens,
+            // `reasoning_effort` is a provider-specific parameter (OpenAI uses
+            // low|medium|high, but e.g. vLLM/Qwen uses xhigh|medium|low). The
+            // generic OpenAI backend passes the configured value through
+            // verbatim and lets the serving backend validate it.
+            reasoning_effort: model.reasoning_effort.clone(),
             stream,
             stream_options: if stream {
                 Some(StreamOptions { include_usage: true })
             } else {
                 None
             },
-            thinking,
-            reasoning_effort: effort,
         }
     }
 }
@@ -493,8 +474,11 @@ impl BackendLike for OpenAIBackend {
             );
         }
 
-        // Build URL: api_base should include the version path (e.g., https://api.openai.com/v1)
-        let url = format!("{}/chat/completions", self.provider.api_base);
+        // Build URL: endpoint may be a base URL or a full chat endpoint.
+        let url = format!(
+            "{}/chat/completions",
+            crate::llm::normalize_endpoint(&self.provider.api_base)
+        );
 
         let mut req = self
             .client
@@ -503,6 +487,9 @@ impl BackendLike for OpenAIBackend {
             .header("Content-Type", "application/json")
             .json(&request);
 
+        for (key, value) in self.provider.headers.iter() {
+            req = req.header(key, value);
+        }
         if let Some(headers) = extra_headers {
             for (key, value) in headers.iter() {
                 req = req.header(key, value);
@@ -560,8 +547,11 @@ impl BackendLike for OpenAIBackend {
             tracing::info!(target: "llm.openai.request", body = %req_json, "OpenAI API streaming request");
         }
 
-        // Build URL: api_base should include the version path (e.g., https://api.openai.com/v1)
-        let url = format!("{}/chat/completions", self.provider.api_base);
+        // Build URL: endpoint may be a base URL or a full chat endpoint.
+        let url = format!(
+            "{}/chat/completions",
+            crate::llm::normalize_endpoint(&self.provider.api_base)
+        );
 
         let mut req = self
             .client
@@ -570,6 +560,9 @@ impl BackendLike for OpenAIBackend {
             .header("Content-Type", "application/json")
             .json(&request);
 
+        for (key, value) in self.provider.headers.iter() {
+            req = req.header(key, value);
+        }
         if let Some(headers) = extra_headers {
             for (key, value) in headers.iter() {
                 req = req.header(key, value);
@@ -589,9 +582,17 @@ impl BackendLike for OpenAIBackend {
 
         let byte_stream = response.bytes_stream();
         let backend = self.clone();
+        let api_base = self.provider.api_base.clone();
 
         let stream = async_stream::stream! {
             let mut buffer = String::new();
+            let mut line_count: u64 = 0;
+            // Set once we have successfully yielded at least one chunk. If the
+            // connection is then closed by the peer without a clean `[DONE]`
+            // sentinel (vLLM with the `qwen3` parser never emits `[DONE]` and
+            // simply FINs after the last delta), we treat the EOF as a graceful
+            // end-of-stream rather than a hard error.
+            let mut saw_content = false;
             let mut byte_stream = std::pin::pin!(byte_stream);
 
             while let Some(chunk_result) = StreamExt::next(&mut byte_stream).await {
@@ -607,26 +608,285 @@ impl BackendLike for OpenAIBackend {
                                 continue;
                             }
 
+                            // Capture non-`data:` SSE lines (e.g. `event:`,
+                            // `error:`) so provider errors aren't silently dropped
+                            // when debugging a stream failure.
+                            if !line.starts_with("data:")
+                                && (line.starts_with("event:") || line.starts_with("error"))
+                            {
+                                tracing::debug!(
+                                    target: "llm.openai.stream",
+                                    url = %api_base,
+                                    line = %line,
+                                    "SSE non-data event"
+                                );
+                            }
+
+                            line_count += 1;
                             if let Some(data) = line.strip_prefix("data: ") {
-                                if let Ok(stream_chunk) =
-                                    serde_json::from_str::<OpenAIStreamChunk>(data)
-                                {
-                                    if let Ok(Some(chunk)) =
-                                        backend.convert_stream_chunk(stream_chunk)
-                                    {
-                                        yield Ok(chunk);
+                                match serde_json::from_str::<OpenAIStreamChunk>(data) {
+                                    Ok(stream_chunk) => {
+                                        // The final usage chunk (empty `choices`)
+                                        // still carries token totals — surface them.
+                                        if let Some(usage) = &stream_chunk.usage {
+                                            let usage_chunk = LLMChunk::new(
+                                                LLMMessage::new(Role::Assistant, ""),
+                                                Some(usage.to_llm_usage()),
+                                            );
+                                            yield Ok(usage_chunk);
+                                        }
+                                        match backend.convert_stream_chunk(stream_chunk) {
+                                            Ok(Some(chunk)) => {
+                                                saw_content = true;
+                                                yield Ok(chunk);
+                                            }
+                                            Ok(None) => {}
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "llm.openai.stream",
+                                                    url = %api_base,
+                                                    error = %e,
+                                                    "Failed to convert OpenAI stream chunk"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // A malformed / non-JSON data line (e.g. an
+                                        // error payload or a truncated chunk) is the
+                                        // single most useful clue for a
+                                        // `error decoding response body` failure.
+                                        tracing::warn!(
+                                            target: "llm.openai.stream",
+                                            url = %api_base,
+                                            error = %e,
+                                            raw = %data,
+                                            "Failed to parse OpenAI SSE data line"
+                                        );
                                     }
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        yield Err(ArrowError::Backend(format!("Stream error: {}", e)));
+                        if saw_content {
+                            // The stream delivered at least one valid chunk and
+                            // then the peer closed the connection (vLLM with the
+                            // `qwen3` reasoning parser FINs without a `[DONE]`
+                            // sentinel, and it also hard-cuts the stream once the
+                            // batched-token budget is exhausted). Surface a
+                            // diagnostic and emit an interrupted sentinel so the
+                            // agent loop can trigger a business-level retry, then
+                            // stop.
+                            let tail: String = buffer
+                                .chars()
+                                .rev()
+                                .take(200)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect();
+                            tracing::warn!(
+                                target: "llm.openai.stream",
+                                url = %api_base,
+                                error = %e,
+                                lines_received = line_count,
+                                buffer_tail = %tail,
+                                "Upstream closed the stream after delivering content; \
+                                 marking stream as interrupted"
+                            );
+                            yield Ok(LLMChunk::interrupted());
+                            break;
+                        }
+                        // A transport/body-decode failure before any content
+                        // arrived is a genuine connection error. Emit enough
+                        // context to diagnose: URL, how far the stream got, and
+                        // the raw tail of the buffer we were parsing.
+                        let tail: String = buffer
+                            .chars()
+                            .rev()
+                            .take(200)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        tracing::error!(
+                            target: "llm.openai.stream",
+                            url = %api_base,
+                            error = %e,
+                            lines_received = line_count,
+                            buffer_tail = %tail,
+                            "Stream chunk error while decoding response body"
+                        );
+                        yield Err(ArrowError::Backend(format!(
+                            "Stream error: {e}"
+                        )));
                     }
                 }
             }
         };
 
         Ok(Box::new(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_parses_cache_hit_tokens() {
+        // Non-streaming response usage with cached-token details.
+        let json = r#"{
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "total_tokens": 1200,
+            "prompt_tokens_details": { "cached_tokens": 700 }
+        }"#;
+        let usage: OpenAIUsage = serde_json::from_str(json).unwrap();
+        let llm = usage.to_llm_usage();
+        assert_eq!(llm.prompt_tokens, 1000);
+        assert_eq!(llm.completion_tokens, 200);
+        assert_eq!(llm.total_tokens, Some(1200));
+        assert_eq!(llm.cache_hit_tokens, Some(700), "cached tokens must be extracted");
+
+        // Providers that omit the details field fall back gracefully.
+        let plain = OpenAIUsage {
+            prompt_tokens: 5,
+            completion_tokens: 5,
+            total_tokens: 10,
+            prompt_tokens_details: None,
+        };
+        let llm = plain.to_llm_usage();
+        assert_eq!(llm.cache_hit_tokens, None);
+    }
+
+    #[test]
+    fn stream_chunk_usage_is_surfaceable() {
+        // A final stream chunk with empty choices + usage must deserialize.
+        let json = r#"{
+            "id": "x",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "prompt_tokens_details": { "cached_tokens": 90 }
+            }
+        }"#;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(json).unwrap();
+        assert!(chunk.choices.is_empty());
+        let usage = chunk.usage.expect("usage present");
+        assert_eq!(usage.to_llm_usage().cache_hit_tokens, Some(90));
+    }
+
+    #[test]
+    fn build_request_forwards_standard_reasoning_effort() {
+        // `reasoning_effort` is a STANDARD OpenAI parameter: the generic
+        // backend must forward it verbatim (low|medium|high) and never emit a
+        // `thinking` field (that is DeepSeek-specific).
+        let backend = OpenAIBackend::new(ProviderConfig {
+            name: "openai".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            backend: "openai".to_string(),
+            api_key: Some("sk-test".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let model = ModelConfig {
+            name: "gpt-5".to_string(),
+            provider: "openai".to_string(),
+            reasoning_effort: Some("medium".to_string()),
+            ..Default::default()
+        };
+
+        let req = backend.build_request(
+            &model,
+            &[],
+            0.2,
+            None,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(req.reasoning_effort.as_deref(), Some("medium"));
+
+        // Serialized body carries reasoning_effort and NO thinking field.
+        let body = serde_json::to_value(&req).unwrap();
+        assert_eq!(body["reasoning_effort"], "medium");
+        assert!(body.get("thinking").is_none(), "thinking is DeepSeek-specific");
+    }
+
+    #[test]
+    fn build_request_passes_through_nonstandard_reasoning_effort() {
+        // `reasoning_effort` is provider-specific: OpenAI accepts
+        // low|medium|high, but e.g. vLLM/Qwen uses xhigh|medium|low. The
+        // generic OpenAI backend MUST forward the configured value verbatim and
+        // let the serving backend validate it — rewriting it (e.g. clamping
+        // `xhigh` to `high`) breaks servers that don't accept the OpenAI set.
+        let backend = OpenAIBackend::new(ProviderConfig {
+            name: "qwen".to_string(),
+            api_base: "http://localhost:8000/v1".to_string(),
+            backend: "openai".to_string(),
+            api_key: Some("k".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let model = ModelConfig {
+            name: "qwen3.8".to_string(),
+            provider: "qwen".to_string(),
+            reasoning_effort: Some("xhigh".to_string()),
+            ..Default::default()
+        };
+
+        let req = backend.build_request(
+            &model,
+            &[],
+            0.6,
+            None,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            req.reasoning_effort.as_deref(),
+            Some("xhigh"),
+            "non-standard provider effort must be forwarded verbatim"
+        );
+    }
+
+    #[test]
+    fn delta_reasoning_field_is_normalized() {
+        // Qwen / vLLM stream thinking via `delta.reasoning` (not
+        // `reasoning_content`). It must surface as `reasoning_content` so the
+        // agent loop can forward it.
+        let backend = OpenAIBackend::new(ProviderConfig {
+            name: "qwen".to_string(),
+            api_base: "http://localhost:8000/v1".to_string(),
+            backend: "openai".to_string(),
+            api_key: Some("k".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let json = r#"{
+            "id": "x",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "qwen3.5",
+            "choices": [{"index": 0, "delta": {"reasoning": "** statements"}, "finish_reason": null}]
+        }"#;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(json).unwrap();
+        let out = backend.convert_stream_chunk(chunk).unwrap().unwrap();
+        assert_eq!(
+            out.message.reasoning_content.as_deref(),
+            Some("** statements"),
+            "Qwen `delta.reasoning` must be surfaced as reasoning_content"
+        );
     }
 }

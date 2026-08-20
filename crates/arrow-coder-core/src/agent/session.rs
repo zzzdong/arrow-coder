@@ -177,6 +177,11 @@ impl AgentSession {
         &mut self.loop_
     }
 
+    /// The currently active model configuration (if any).
+    pub fn model(&self) -> Option<&crate::core::ModelConfig> {
+        self.loop_.model()
+    }
+
     // --- Model / effort configuration (cross-host, next-turn semantics) -----
 
     /// Queue a model alias to take effect on the next turn.

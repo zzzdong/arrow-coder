@@ -1,5 +1,40 @@
 # Arrow Code Configuration File
-# Place this file at ~/.vibe/config.toml or .vibe/config.toml (project-local)
+# Place this file at ~/.arrowcode/config.toml or .arrowcode/config.toml (project-local).
+#
+# =============================================================================
+# MODEL / BACKEND ARCHITECTURE (scheme A)
+# -----------------------------------------------------------------------------
+#   openai / openai-compatible   —— the GENERIC OpenAI-compatible protocol layer.
+#        Works with ANY endpoint that speaks `POST /v1/chat/completions`
+#        (OpenAI, Qwen, GLM, Kimi, vLLM, Ollama, LocalAI, ...). This is the
+#        DEFAULT backend type and the recommended base for self-contained models
+#        (see `model.toml` below).
+#
+#   deepseek-chat               —— a SPECIALIZATION of the OpenAI protocol.
+#        Still `POST /chat/completions` and reuses the generic layer, but adds
+#        the DeepSeek-specific top-level `thinking` switch and expands
+#        `reasoning_effort` to the closed set off|high|max (OpenAI itself only
+#        accepts low|medium|high). Also uses `user_id`, `reasoning_content`, and
+#        DeepSeek's usage shape. Use it only for DeepSeek-family models.
+#
+#   deepseek-responses          —— an INDEPENDENT protocol (DeepSeek `/responses`).
+#        Different wire format entirely: `input` items + `instructions`,
+#        `reasoning: { effort }`, `output` function_call items, semantic SSE
+#        event stream (no `[DONE]`). Only for DeepSeek Models API.
+#
+#   anthropic                   —— an INDEPENDENT protocol (Anthropic `/v1/messages`).
+#
+# A note on `reasoning_effort` vs `thinking`:
+#   - `reasoning_effort` is a STANDARD OpenAI chat-completions parameter
+#     (low | medium | high, used by gpt-5 / o3 / o4-mini). The generic
+#     openai-compatible backend forwards it verbatim.
+#   - `thinking` is DeepSeek-specific; it enables/disables the reasoning chain
+#     on DeepSeek models and is only understood by the deepseek-chat backend.
+#
+# Bottom line: start with `openai-compatible` for anything that mimics the
+# OpenAI chat API. Only pick `deepseek-chat` / `deepseek-responses` / `anthropic`
+# when you need that provider's proprietary fields or protocol.
+# =============================================================================
 
 # Active model alias to use
 active_model = "mistral-medium"
@@ -11,38 +46,38 @@ default_agent = "default"
 bypass_tool_permissions = false
 context_warnings = true
 
-# [[providers]]
-# name = "mistral"
-# api_base = "https://api.mistral.ai/v1"
-# api_key_env_var = "MISTRAL_API_KEY"
-# backend = "mistral"
+# --- Shared providers (optional; a model may also be fully self-contained) ---
 #
+# Generic OpenAI-compatible provider. `backend` defaults to openai-compatible,
+# so you usually don't need to write it:
 # [[providers]]
 # name = "openai"
 # api_base = "https://api.openai.com/v1"
 # api_key_env_var = "OPENAI_API_KEY"
-# backend = "openai"
-# reasoning_field_name = "reasoning_content"
+# reasoning_field_name = "reasoning_content"   # surface `reasoning_content` from compatible APIs
 #
+# DeepSeek as a SPECIALIZED OpenAI-compatible backend (adds thinking / effort):
 # [[providers]]
 # name = "deepseek"
 # api_base = "https://api.deepseek.com"
 # api_key_env_var = "DEEPSEEK_API_KEY"
-# # Use the dedicated DeepSeek Chat Completions backend (own wire format:
-# # top-level `thinking`, `user_id` instead of `user`, `reasoning_content`,
-# # DeepSeek-specific usage fields).
 # backend = "deepseek-chat"
 # reasoning_field_name = "reasoning_content"
 #
+# DeepSeek Responses API (independent protocol):
 # [[providers]]
 # name = "deepseek-responses"
 # api_base = "https://api.deepseek.com"
 # api_key_env_var = "DEEPSEEK_API_KEY"
-# # Use the dedicated DeepSeek Responses API backend (`/responses`): `input`
-# # items + `instructions`, `reasoning: { effort }`, `output` function_call
-# # items, semantic SSE event stream (no `[DONE]`).
 # backend = "deepseek-responses"
 # reasoning_field_name = "reasoning_content"
+#
+# Anthropic (independent protocol):
+# [[providers]]
+# name = "anthropic"
+# api_base = "https://api.anthropic.com"
+# api_key_env_var = "ANTHROPIC_API_KEY"
+# backend = "anthropic"
 
 # [[models]]
 # name = "mistral-large-latest"
@@ -53,6 +88,32 @@ context_warnings = true
 # input_price = 2.0
 # output_price = 6.0
 # thinking = "high"
+#
+# --- Standalone model.toml ---
+# Models can also be defined in a dedicated `model.toml` file (either
+# `~/.arrowcode/model.toml` (user) or `.arrowcode/model.toml` (project, takes
+# precedence)). A model may be fully self-contained and point at any
+# OpenAI-compatible endpoint without a separate [[providers]] entry. The
+# openai-compatible backend is the default.
+#
+# [[model]]
+# name = "qwen3.8"
+# model_id = "qwen3.5"            # wire model id sent to the API (defaults to `name`)
+# endpoint = "https://localhost:8000/v1/chat/completions"
+# api_key = "xxx"
+# verify_tls = false              # disable TLS verification for self-signed certs
+# headers = { cookie = "xxxxxxxxxxxxxxxxx" }   # extra HTTP headers on every request
+# alias = "qwen3"
+# temperature = 0.2               # sampling temperature (default 0.2)
+# top_p = 0.95                    # nucleus sampling threshold (optional)
+# top_k = 20                      # top-K sampling (optional)
+# presence_penalty = 0.0          # repeat penalty (optional)
+# max_tokens = 8192               # max completion tokens (auto-clamped to remaining context window)
+# context_window = 131072         # model context window in tokens (default 128k); MUST be <= the serving backend's limit
+#                                 # (e.g. vLLM --max-model-len). Drives auto-compaction AND the max_tokens safety clamp that
+#                                 # prevents the backend from cutting the connection on overflow.
+# auto_compact_threshold = 100000 # compact when session reaches this many tokens (default: 80% of context_window)
+# thinking = "high"               # optional extended-thinking mode
 #
 # [[models]]
 # name = "deepseek-chat"
