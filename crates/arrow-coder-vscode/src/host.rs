@@ -15,14 +15,14 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use arrow_coder_core::agent::{AgentLoop, AgentLoopConfig, AgentSession};
 use arrow_coder_core::agents::AgentManager;
-use arrow_coder_core::core::config::{ProviderConfig, VibeConfig};
+use arrow_coder_core::core::config::{ModelConfig, VibeConfig};
 use arrow_coder_core::core::error::Result as CoreResult;
 use arrow_coder_core::core::BaseEvent;
 
 use crate::jsonrpc::FileChangeEntry;
 use arrow_coder_core::llm::BackendLike;
 use arrow_coder_core::session::{
-    SessionLoggerConfig, SessionManager,
+    SessionLogger, SessionLoggerConfig, SessionManager,
 };
 use arrow_coder_core::skills::SkillManager;
 use arrow_coder_core::tools::PermissionChecker;
@@ -67,6 +67,9 @@ pub struct Host {
     /// Session persistence config, captured at `initialize`/`build_session` time.
     /// Used to reach the on-disk store for true deletion (not just registry prune).
     session_config: Option<SessionLoggerConfig>,
+    /// Active session logger (bound to the on-disk session dir), used to persist
+    /// per-session state such as the model selection. Captured at build_session.
+    session_logger: Option<SessionLogger>,
     /// The cwd this host is currently attached to (the active workspace root).
     active_cwd: Option<String>,
     /// The id of the currently open session (if any).
@@ -103,6 +106,7 @@ impl Host {
             active_cwd: None,
             active_session_id: None,
             session_config: None,
+            session_logger: None,
             running: Arc::new(AtomicBool::new(false)),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_questions: Arc::new(Mutex::new(HashMap::new())),
@@ -348,6 +352,7 @@ impl Host {
         let pending_effort = self.pending_effort.take();
         let content = content.clone();
         let references = references.clone();
+        let session_logger = self.session_logger.clone();
         let (done_tx, mut done_rx) = oneshot::channel::<()>();
 
         // Spawn a printer that drains broadcast events into stdout lines until
@@ -404,19 +409,97 @@ impl Host {
         // responsive to `session/cancel` and `session/inject` requests.
         tokio::spawn(async move {
             running.store(true, Ordering::SeqCst);
+
             // Apply any pending model/effort switch *before* this turn. This is
             // the only point where reconfiguration takes effect — the existing
             // session (and its context) is preserved; only the active model
-            // config is swapped.
+            // config (and, if it changed, the backend) is swapped.
+            //
+            // Because each session may use its own model — including a
+            // self-contained model with its own endpoint/api_key — we rebuild
+            // the backend whenever the target model for this turn differs from
+            // the session's current model.
             {
-                let mut s = session.lock().await;
-                if pending_model.is_some() || pending_effort.is_some() {
-                    if let Some(cfg) = cfg.as_ref() {
-                        Host::apply_pending_config(&mut s, cfg, pending_model, pending_effort);
+                // 1. Resolve the target model for this turn (outside the lock).
+                let target: Option<arrow_coder_core::core::config::ModelConfig> = if let Some(alias) =
+                    &pending_model
+                {
+                    cfg.as_ref().and_then(|c| {
+                        c.models
+                            .iter()
+                            .find(|m| m.alias == *alias || m.name == *alias)
+                            .cloned()
+                    })
+                } else {
+                    session.lock().await.model().cloned()
+                };
+
+                // 2. Build a fresh backend when the model changed, and remember
+                //    the newly-selected model so it can be persisted to the
+                //    session (restored on the next resume).
+                let (new_backend, newly_selected): (Option<Arc<dyn BackendLike>>, Option<String>) =
+                    match (&target, cfg.as_ref()) {
+                        (Some(t), Some(cfg)) => {
+                            let guard = session.lock().await;
+                            let current = guard.model();
+                            let changed = match current {
+                                Some(cur) => cur.name != t.name
+                                    || cur.provider != t.provider
+                                    || cur.endpoint != t.endpoint,
+                                None => true,
+                            };
+                            drop(guard);
+                            if changed {
+                                match init_backend_for_model(cfg, t).await {
+                                    Ok(b) => {
+                                        tracing::debug!(
+                                            "do_send: rebuilt backend for model '{}'",
+                                            t.name
+                                        );
+                                        (Some(b), Some(t.name.clone()))
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "do_send: failed to rebuild backend for '{}': {e}",
+                                            t.name
+                                        );
+                                        (None, None)
+                                    }
+                                }
+                            } else {
+                                (None, None)
+                            }
+                        }
+                        _ => (None, None),
+                    };
+
+                // Persist the newly-selected model to the session's metadata so a
+                // future resume restores this selection automatically.
+                if let Some(model_name) = &newly_selected {
+                    if let Some(logger) = &session_logger {
+                        if let Err(e) = logger.save_model(model_name) {
+                            tracing::warn!(
+                                "do_send: failed to persist session model '{}': {e}",
+                                model_name
+                            );
+                        }
                     }
                 }
-                // Wire the abort signal into the loop so a running turn observes it.
-                s.set_abort_rx(abort_rx);
+
+                // 3. Apply inside the lock.
+                {
+                    let mut s = session.lock().await;
+                    if let Some(backend) = new_backend {
+                        s.loop_mut().set_backend(backend);
+                    }
+                    if pending_model.is_some() || pending_effort.is_some() {
+                        if let Some(cfg) = cfg.as_ref() {
+                            Host::apply_pending_config(&mut s, cfg, pending_model, pending_effort);
+                        }
+                    }
+                    // Wire the abort signal into the loop so a running turn observes it.
+                    s.set_abort_rx(abort_rx);
+                }
             }
             let result = {
                 let mut s = session.lock().await;
@@ -582,10 +665,13 @@ impl Host {
     /// currently-active selection (accounting for any pending override).
     fn emit_config(&self) -> Event {
         let cfg = self.cfg.as_ref().expect("emit_config called before init");
+        // Active selection: a pending override wins; otherwise the model this
+        // session would use for a brand-new session (default_model → active_model
+        // → first), so the UI shows a real selection immediately.
         let active_alias = self
             .pending_model
             .clone()
-            .or_else(|| Some(cfg.get_active_model().map(|m| m.name.clone()).unwrap_or_default()))
+            .or_else(|| cfg.get_default_model().map(|m| m.name.clone()))
             .unwrap_or_default();
 
         // Resolve the model that will actually be used next (pending override
@@ -962,6 +1048,22 @@ impl Host {
     // ---- session assembly (mirrors CLI programmatic mode) ----
 
     async fn build_session(&mut self, params: &InitializeParams) -> CoreResult<()> {
+        // Ensure the user-level config directory tree + initial config files
+        // exist before we try to load them. The logic lives in core; this host
+        // only triggers it. Failure is non-fatal (we fall back to defaults).
+        match VibeConfig::ensure_config() {
+            Ok(created) if created > 0 => {
+                tracing::info!(
+                    "build_session: created {} user config file(s)",
+                    created
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                "build_session: failed to ensure config: {e}; using defaults"
+            ),
+        }
+
         let config = VibeConfig::load_resolved().unwrap_or_else(|_| VibeConfig::with_defaults());
         tracing::debug!("build_session: config resolved, working_dir={:?}", params.cwd);
         // Retain the resolved config so `reconfigure`/`emit_config` can later
@@ -977,31 +1079,13 @@ impl Host {
 
         let auto_approve = params.auto_approve.unwrap_or(config.bypass_tool_permissions);
 
-        // Model + provider resolution.
-        let model_config = config
-            .get_active_model()
-            .cloned()
-            .ok_or_else(|| arrow_coder_core::core::ArrowError::Config(
-                "No active model configured. Set 'active_model' in your config file.".to_string(),
-            ))?;
-
-        let provider_config: ProviderConfig = config
-            .providers
-            .iter()
-            .find(|p| p.name == model_config.provider)
-            .cloned()
-            .ok_or_else(|| arrow_coder_core::core::ArrowError::Config(format!(
-                "Provider '{}' not found for model '{}'.",
-                model_config.provider, model_config.name
-            )))?;
-
-        let backend: Arc<dyn BackendLike> = init_backend(&provider_config).await?;
-        tracing::debug!("build_session: backend initialized (provider={})", provider_config.name);
-
         // Session persistence. Resume if explicitly requested; otherwise, when a
         // workspace already has history for this cwd, auto-resume its latest
         // session so re-opening a folder lands you back in the recent
         // conversation. The "New session" button forces `fresh: true` to opt out.
+        //
+        // This must run BEFORE model resolution so a resumed session can restore
+        // the model it last used (each session remembers its own selection).
         let arrowcode_home = VibeConfig::arrowcode_home()
             .unwrap_or_else(|| PathBuf::from(".arrowcode"));
         let session_config = SessionLoggerConfig {
@@ -1023,6 +1107,8 @@ impl Host {
         };
 
         let mut session_manager = SessionManager::new(session_config.clone());
+        // Remembered model of the resumed session, if any.
+        let mut remembered_model: Option<String> = None;
         if let Some(resume_id) = &effective_resume {
             // Resume path. `SessionManager::load_session` resolves the id against
             // the on-disk session directories; if it cannot find a matching
@@ -1030,7 +1116,10 @@ impl Host {
             // otherwise the user's history is lost on reopen. Warn loudly so the
             // failure is observable, and leave the (empty) session in place.
             match session_manager.load_session(resume_id) {
-                Ok(_) => tracing::info!("build_session: resumed session '{}'", resume_id),
+                Ok(_) => {
+                    tracing::info!("build_session: resumed session '{}'", resume_id);
+                    remembered_model = session_manager.read_model_from_disk(resume_id);
+                }
                 Err(e) => tracing::warn!(
                     "build_session: FAILED to resume '{}' ({}); opening empty session",
                     resume_id,
@@ -1042,6 +1131,76 @@ impl Host {
             tracing::debug!("build_session: created fresh session");
         }
         tracing::debug!("build_session: session manager ready");
+        // Keep the active session logger so per-session state (e.g. the model
+        // selection) can be persisted when it changes on a later turn.
+        self.session_logger = session_manager.logger();
+        self.session_config = Some(session_config.clone());
+
+        // Model + backend resolution. The active model may be self-contained
+        // (own endpoint / api_key) or reference a shared provider.
+        //
+        // Model selection priority:
+        //   1. A RESUMED session's own remembered model (persisted on last use).
+        //   2. Otherwise `default_model` (from model.toml) → `active_model` →
+        //      the first model.
+        // This means `active_model` is NOT required to start: without it the
+        // extension boots with the default/first model and the user can pick any
+        // model from the dropdown (session/reconfigure). Only when there are
+        // genuinely zero models do we abort with a clear error.
+        let model_config = if let Some(remembered) = &remembered_model {
+            // Restore the session's own model if it still exists in config.
+            if let Some(m) = config
+                .models
+                .iter()
+                .find(|m| m.alias == *remembered || m.name == *remembered)
+            {
+                tracing::info!(
+                    "build_session: restored session model '{}'",
+                    remembered
+                );
+                m.clone()
+            } else {
+                // Remembered model no longer configured; fall back to default.
+                tracing::warn!(
+                    "build_session: remembered model '{}' no longer configured; using default",
+                    remembered
+                );
+                match config.get_default_model() {
+                    Some(m) => m.clone(),
+                    None => {
+                        return Err(arrow_coder_core::core::ArrowError::Config(
+                            "No models configured. Add at least one model to your config (config.toml or model.toml).".to_string(),
+                        ));
+                    }
+                }
+            }
+        } else {
+            match config.get_default_model() {
+                Some(m) => m.clone(),
+                None => {
+                    return Err(arrow_coder_core::core::ArrowError::Config(
+                        "No models configured. Add at least one model to your config (config.toml or model.toml).".to_string(),
+                    ));
+                }
+            }
+        };
+
+        let backend: Arc<dyn BackendLike> =
+            init_backend_for_model(&config, &model_config).await?;
+        tracing::debug!(
+            "build_session: backend initialized (model={})",
+            model_config.name
+        );
+
+        // Persist the initial model selection so a later resume restores it.
+        if let Some(logger) = &self.session_logger {
+            if let Err(e) = logger.save_model(&model_config.name) {
+                tracing::warn!(
+                    "build_session: failed to persist initial session model '{}': {e}",
+                    model_config.name
+                );
+            }
+        }
 
         let skill_manager = SkillManager::new({
             let config = config.clone();
@@ -1250,7 +1409,10 @@ impl Host {
         let mut agent_loop = AgentLoop::new(AgentLoopConfig {
             max_turns: Some(200),
             max_price: None,
-            max_session_tokens: model_config.max_tokens.map(|t| t as u64),
+            // Session context window comes from the model's `context_window`
+            // (defaults to 128k). This drives context occupancy reporting and
+            // the automatic-compaction trigger point.
+            max_session_tokens: Some(model_config.context_window_or_default()),
             auto_compact_threshold: model_config.auto_compact_threshold,
         })
         .with_backend(backend)
@@ -1519,11 +1681,13 @@ fn map_event_ui(ev: BaseEvent) -> Vec<arrow_coder_core::session::UiMessage> {
     }
 }
 
-/// Initialize the LLM backend from a provider config. Delegates to the single
+/// Initialize the LLM backend for a specific model. Delegates to the single
 /// source of truth in core; hosts (CLI, VS Code server) must not duplicate the
-/// backend `match`.
-async fn init_backend(
-    provider_config: &ProviderConfig,
+/// backend `match`. A self-contained model (own endpoint / api_key) takes the
+/// openai-compatible path without needing a separate provider.
+async fn init_backend_for_model(
+    config: &VibeConfig,
+    model: &ModelConfig,
 ) -> CoreResult<Arc<dyn BackendLike>> {
-    arrow_coder_core::llm::init_backend(provider_config)
+    arrow_coder_core::llm::init_backend_for_model(config, model)
 }

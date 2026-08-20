@@ -1,0 +1,50 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "shell",
+      "command": "npm run compile",
+      "label": "npm: compile (vscode-extension)",
+      "detail": "Build the vscode-extension: tsc (host TS) + vite build (webview SPA) -> vscode-extension/out",
+      "options": {
+        "cwd": "${workspaceFolder}/vscode-extension"
+      },
+      "problemMatcher": [
+        "$tsc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "type": "shell",
+      "command": "npm run watch",
+      "label": "npm: watch (vscode-extension)",
+      "detail": "Continuous build: tsc -watch + vite build --watch. Use with the 'Run Extension (watch)' launch config.",
+      "isBackground": true,
+      "options": {
+        "cwd": "${workspaceFolder}/vscode-extension"
+      },
+      "problemMatcher": [
+        "$tsc-watch"
+      ],
+      "group": {
+        "kind": "build"
+      }
+    },
+    {
+      "type": "shell",
+      "command": "cargo install --path crates/arrow-coder-vscode/ --force",
+      "label": "cargo: install host",
+      "problemMatcher": [],
+      "detail": "Dev workflow: install the host into ~/.cargo/bin via `cargo install --path`, so the extension resolves it from PATH (Tier 3) at the latest protocol version. Re-run after changing Rust code. For packaging (bundled bin/), use `npm run package` instead.",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build"
+      }
+    }
+  ]
+}

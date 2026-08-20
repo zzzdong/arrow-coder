@@ -118,10 +118,24 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
 async fn run_setup() -> Result<()> {
     println!("Welcome to Arrow Code!");
 
-    // Ensure ArrowCode home directories exist
+    // Ensure the user-level configuration directory tree and initial config
+    // files exist (~/.arrowcode with config.toml and model.toml).
+    let created = VibeConfig::ensure_config()?;
+    if created > 0 {
+        println!(
+            "Configuration initialized: created {} file(s).",
+            created
+        );
+    } else {
+        println!("Configuration already exists; nothing to create.");
+    }
+
     let arrowcode_home = VibeConfig::arrowcode_home()
         .unwrap_or_else(|| PathBuf::from(".arrowcode"));
-    std::fs::create_dir_all(&arrowcode_home)?;
+    if let Some(user_cfg) = VibeConfig::user_config_path() {
+        println!("\nUser config file: {}", user_cfg.display());
+    }
+    println!("ArrowCode home: {}", arrowcode_home.display());
 
     // Initialize default skills directory and sample skill
     match arrow_coder_core::skills::init_skills() {
@@ -140,7 +154,11 @@ async fn run_setup() -> Result<()> {
     println!("  3. Default model selection");
     println!("  4. Trust settings");
     println!("\nFor now, please manually edit the configuration file at:");
-    println!("  ~/.arrowcode/config.toml");
+    if let Some(user_cfg) = VibeConfig::user_config_path() {
+        println!("  {}", user_cfg.display());
+    } else {
+        println!("  ~/.arrowcode/config.toml");
+    }
     Ok(())
 }
 
@@ -211,18 +229,9 @@ async fn run_programmatic_mode(
             "No active model configured. Please set 'active_model' in your config file.".to_string()
         ))?;
 
-    let provider_config = config
-        .providers
-        .iter()
-        .find(|p| p.name == model_config.provider)
-        .cloned()
-        .ok_or_else(|| ArrowError::Config(
-            format!("Provider '{}' not found for model '{}'. Please configure the provider in your config file.",
-                model_config.provider, model_config.name)
-        ))?;
-
-    // Initialize backend
-    let backend = arrow_coder_core::llm::init_backend(&provider_config)?;
+    // Initialize backend from the active model (supports self-contained
+    // OpenAI-compatible models without a separate provider).
+    let backend = arrow_coder_core::llm::init_backend_for_model(&config, &model_config)?;
 
     // Create a session for this run
     let mut session_manager = session_manager;
@@ -232,7 +241,7 @@ async fn run_programmatic_mode(
     let mut agent_loop = arrow_coder_core::agent::AgentLoop::new(arrow_coder_core::agent::AgentLoopConfig {
         max_turns: args.max_turns.or(Some(10)),
         max_price: args.max_price,
-        max_session_tokens: args.max_tokens.or(model_config.max_tokens.map(|t| t as u64)),
+        max_session_tokens: Some(model_config.context_window_or_default()),
         auto_compact_threshold: model_config.auto_compact_threshold,
     })
     .with_model(model_config.clone());
@@ -371,18 +380,9 @@ async fn run_interactive_mode(
             "No active model configured. Please set 'active_model' in your config file.".to_string()
         ))?;
 
-    let provider_config = config
-        .providers
-        .iter()
-        .find(|p| p.name == model_config.provider)
-        .cloned()
-        .ok_or_else(|| ArrowError::Config(
-            format!("Provider '{}' not found for model '{}'. Please configure the provider in your config file.",
-                model_config.provider, model_config.name)
-        ))?;
-
-    // Initialize backend
-    let backend = arrow_coder_core::llm::init_backend(&provider_config)?;
+    // Initialize backend from the active model (supports self-contained
+    // OpenAI-compatible models without a separate provider).
+    let backend = arrow_coder_core::llm::init_backend_for_model(&config, &model_config)?;
 
     // Build the base tool set first (without task/skill to avoid recursive
     // delegation). Tools come from the unified registry so config-driven
@@ -426,7 +426,7 @@ async fn run_interactive_mode(
     let mut agent_loop = arrow_coder_core::agent::AgentLoop::new(arrow_coder_core::agent::AgentLoopConfig {
         max_turns: args.max_turns.or(Some(10)),
         max_price: args.max_price,
-        max_session_tokens: args.max_tokens.or(model_config.max_tokens.map(|t| t as u64)),
+        max_session_tokens: Some(model_config.context_window_or_default()),
         auto_compact_threshold: model_config.auto_compact_threshold,
     })
     .with_backend(backend)

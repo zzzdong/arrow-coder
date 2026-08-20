@@ -4,7 +4,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
 
 use crate::core::{
     AvailableTool, FunctionCall, LLMChunk, LLMMessage, LLMUsage, Role, ToolCall, ToolChoice,
@@ -104,9 +103,7 @@ impl AnthropicBackend {
                 )
             ))?;
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()?;
+        let client = crate::llm::build_client(provider.verify_tls)?;
 
         Ok(Self {
             client,
@@ -251,7 +248,7 @@ impl BackendLike for AnthropicBackend {
         let (system, anthropic_messages) = self.convert_messages(messages);
 
         let request = AnthropicRequest {
-            model: model.name.clone(),
+            model: model.model_id().to_string(),
             messages: anthropic_messages,
             system,
             max_tokens: max_tokens.unwrap_or(4096),
@@ -268,12 +265,18 @@ impl BackendLike for AnthropicBackend {
 
         let mut req = self
             .client
-            .post(&format!("{}/v1/messages", self.provider.api_base))
+            .post(&format!(
+                "{}/v1/messages",
+                crate::llm::normalize_endpoint(&self.provider.api_base)
+            ))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&request);
 
+        for (key, value) in self.provider.headers.iter() {
+            req = req.header(key, value);
+        }
         if let Some(headers) = extra_headers {
             for (key, value) in headers.iter() {
                 req = req.header(key, value);
@@ -314,7 +317,7 @@ impl BackendLike for AnthropicBackend {
         let (system, anthropic_messages) = self.convert_messages(messages);
 
         let request = AnthropicRequest {
-            model: model.name.clone(),
+            model: model.model_id().to_string(),
             messages: anthropic_messages,
             system,
             max_tokens: max_tokens.unwrap_or(4096),
@@ -331,12 +334,18 @@ impl BackendLike for AnthropicBackend {
 
         let mut req = self
             .client
-            .post(&format!("{}/v1/messages", self.provider.api_base))
+            .post(&format!(
+                "{}/v1/messages",
+                crate::llm::normalize_endpoint(&self.provider.api_base)
+            ))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&request);
 
+        for (key, value) in self.provider.headers.iter() {
+            req = req.header(key, value);
+        }
         if let Some(headers) = extra_headers {
             for (key, value) in headers.iter() {
                 req = req.header(key, value);

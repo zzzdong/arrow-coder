@@ -35,7 +35,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::time::Duration;
 
 use crate::core::{
     AvailableTool, FunctionCall, LLMChunk, LLMMessage, LLMUsage, Role, ToolCall, ToolChoice,
@@ -373,9 +372,7 @@ impl DeepSeekChatBackend {
             ))
         })?;
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()?;
+        let client = crate::llm::build_client(provider.verify_tls)?;
 
         Ok(Self {
             client,
@@ -387,7 +384,7 @@ impl DeepSeekChatBackend {
     fn url(&self) -> String {
         format!(
             "{}/chat/completions",
-            self.provider.api_base.trim_end_matches('/')
+            crate::llm::normalize_endpoint(&self.provider.api_base)
         )
     }
 
@@ -507,7 +504,7 @@ impl DeepSeekChatBackend {
         };
 
         Ok(DeepSeekChatRequest {
-            model: model.name.clone(),
+            model: model.model_id().to_string(),
             messages: chat_messages,
             thinking,
             tools: tools.map(|t| t.to_vec()),
@@ -554,14 +551,16 @@ impl BackendLike for DeepSeekChatBackend {
             "DeepSeek chat completions request"
         );
 
-        let response = self
+        let mut builder = self
             .client
             .post(self.url())
             .bearer_auth(&self.api_key)
             .header("x-deepseek-harness-user-id", anonymous_user_id())
-            .json(&request)
-            .send()
-            .await?;
+            .json(&request);
+        for (key, value) in self.provider.headers.iter() {
+            builder = builder.header(key, value);
+        }
+        let response = builder.send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -637,14 +636,16 @@ impl BackendLike for DeepSeekChatBackend {
             "DeepSeek chat completions request"
         );
 
-        let response = self
+        let mut builder = self
             .client
             .post(self.url())
             .bearer_auth(&self.api_key)
             .header("x-deepseek-harness-user-id", anonymous_user_id())
-            .json(&request)
-            .send()
-            .await?;
+            .json(&request);
+        for (key, value) in self.provider.headers.iter() {
+            builder = builder.header(key, value);
+        }
+        let response = builder.send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -661,6 +662,9 @@ impl BackendLike for DeepSeekChatBackend {
         // idle timeout; a single stalled read (no bytes for 5 min) is the real
         // failure signal.
         const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+        // Capture the URL before entering the stream (it borrows `self`, which a
+        // `'static` stream cannot do).
+        let api_base = self.provider.api_base.clone();
 
         let stream = async_stream::stream! {
             let mut acc_text = String::new();
@@ -679,6 +683,10 @@ impl BackendLike for DeepSeekChatBackend {
             // or tool-arguments fragment it carried (the "last reply invisible"
             // symptom this fixes).
             let mut line_buf = String::new();
+            let mut line_count: u64 = 0;
+            // Set once we have successfully yielded at least one chunk; see the
+            // EOF branch below for why this gates error vs. graceful termination.
+            let mut saw_content = false;
             loop {
                 let chunk_result = tokio::time::timeout(
                     STREAM_IDLE_TIMEOUT,
@@ -710,6 +718,7 @@ impl BackendLike for DeepSeekChatBackend {
                             if line.is_empty() || !line.starts_with("data:") {
                                 continue;
                             }
+                            line_count += 1;
                             let data = &line[5..];
                             let data = data.trim_start();
                             if data == "[DONE]" {
@@ -718,7 +727,13 @@ impl BackendLike for DeepSeekChatBackend {
                             let chunk: DeepSeekChatChunk = match serde_json::from_str(data) {
                                 Ok(c) => c,
                                 Err(e) => {
-                                    tracing::warn!(target: "llm.deepseek.chat.stream", error = %e, "Failed to parse SSE chunk");
+                                    tracing::warn!(
+                                        target: "llm.deepseek.chat.stream",
+                                        url = %api_base,
+                                        error = %e,
+                                        raw = %data,
+                                        "Failed to parse DeepSeek SSE chunk"
+                                    );
                                     continue;
                                 }
                             };
@@ -738,6 +753,7 @@ impl BackendLike for DeepSeekChatBackend {
                                 }
                                 if let Some(text) = &delta.content {
                                     acc_text.push_str(text);
+                                    saw_content = true;
                                     yield Ok(LLMChunk::new(LLMMessage::assistant(text.clone()), None));
                                 }
                                 if let Some(tool_calls) = &delta.tool_calls {
@@ -814,7 +830,48 @@ impl BackendLike for DeepSeekChatBackend {
                         }
                     }
                     Err(e) => {
-                        yield Err(ArrowError::Backend(format!("Stream error: {}", e)));
+                        if saw_content {
+                            let tail: String = line_buf
+                                .chars()
+                                .rev()
+                                .take(200)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect();
+                            tracing::warn!(
+                                target: "llm.deepseek.chat.stream",
+                                url = %api_base,
+                                error = %e,
+                                lines_received = line_count,
+                                buffer_tail = %tail,
+                                "Upstream closed the stream after delivering content; \
+                                 marking stream as interrupted"
+                            );
+                            yield Ok(LLMChunk::interrupted());
+                            break;
+                        }
+                        // A transport/body-decode failure before any content
+                        // arrived is a genuine connection error.
+                        let tail: String = line_buf
+                            .chars()
+                            .rev()
+                            .take(200)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        tracing::error!(
+                            target: "llm.deepseek.chat.stream",
+                            url = %api_base,
+                            error = %e,
+                            lines_received = line_count,
+                            buffer_tail = %tail,
+                            "Stream chunk error while decoding response body"
+                        );
+                        yield Err(ArrowError::Backend(format!(
+                            "Stream error: {e}"
+                        )));
                     }
                 }
             }
@@ -1039,9 +1096,7 @@ impl DeepSeekResponsesBackend {
             ))
         })?;
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()?;
+        let client = crate::llm::build_client(provider.verify_tls)?;
 
         Ok(Self {
             client,
@@ -1053,7 +1108,7 @@ impl DeepSeekResponsesBackend {
     fn url(&self) -> String {
         format!(
             "{}/responses",
-            self.provider.api_base.trim_end_matches('/')
+            crate::llm::normalize_endpoint(&self.provider.api_base)
         )
     }
 
@@ -1155,7 +1210,7 @@ impl DeepSeekResponsesBackend {
         };
 
         Ok(DeepSeekResponsesRequest {
-            model: model.name.clone(),
+            model: model.model_id().to_string(),
             input,
             instructions,
             reasoning,
@@ -1201,14 +1256,16 @@ impl BackendLike for DeepSeekResponsesBackend {
             "DeepSeek responses request"
         );
 
-        let response = self
+        let mut builder = self
             .client
             .post(self.url())
             .bearer_auth(&self.api_key)
             .header("x-deepseek-harness-user-id", anonymous_user_id())
-            .json(&request)
-            .send()
-            .await?;
+            .json(&request);
+        for (key, value) in self.provider.headers.iter() {
+            builder = builder.header(key, value);
+        }
+        let response = builder.send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -1306,14 +1363,16 @@ impl BackendLike for DeepSeekResponsesBackend {
             "DeepSeek responses request"
         );
 
-        let response = self
+        let mut builder = self
             .client
             .post(self.url())
             .bearer_auth(&self.api_key)
             .header("x-deepseek-harness-user-id", anonymous_user_id())
-            .json(&request)
-            .send()
-            .await?;
+            .json(&request);
+        for (key, value) in self.provider.headers.iter() {
+            builder = builder.header(key, value);
+        }
+        let response = builder.send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -1324,6 +1383,9 @@ impl BackendLike for DeepSeekResponsesBackend {
         let byte_stream = response.bytes_stream();
 
         const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+        // Capture the URL before entering the stream (it borrows `self`, which a
+        // `'static` stream cannot do).
+        let api_base = self.provider.api_base.clone();
 
         let stream = async_stream::stream! {
             let mut acc_text = String::new();
@@ -1334,6 +1396,9 @@ impl BackendLike for DeepSeekResponsesBackend {
             let mut fn_name: Option<String> = None;
             let mut fn_args: String = String::new();
             let mut fn_open = false;
+            // Set once we have successfully yielded at least one chunk; gates
+            // error vs. graceful termination on a peer-closed stream.
+            let mut saw_content = false;
 
             let mut byte_stream = std::pin::pin!(byte_stream);
             loop {
@@ -1384,6 +1449,7 @@ impl BackendLike for DeepSeekResponsesBackend {
                                 "response.output_text.delta" => {
                                     if let Some(delta) = event.delta {
                                         acc_text.push_str(&delta);
+                                        saw_content = true;
                                         yield Ok(LLMChunk::new(LLMMessage::assistant(delta), None));
                                     }
                                 }
@@ -1393,6 +1459,7 @@ impl BackendLike for DeepSeekResponsesBackend {
                                         let mut msg = LLMMessage::assistant(String::new());
                                         msg.content = None;
                                         msg.reasoning_content = Some(delta);
+                                        saw_content = true;
                                         yield Ok(LLMChunk::new(msg, None));
                                     }
                                 }
@@ -1442,7 +1509,28 @@ impl BackendLike for DeepSeekResponsesBackend {
                         }
                     }
                     Err(e) => {
-                        yield Err(ArrowError::Backend(format!("Stream error: {}", e)));
+                        if saw_content {
+                            tracing::warn!(
+                                target: "llm.deepseek.responses.stream",
+                                url = %api_base,
+                                error = %e,
+                                "Upstream closed the stream after delivering content; \
+                                 marking stream as interrupted"
+                            );
+                            yield Ok(LLMChunk::interrupted());
+                            break;
+                        }
+                        // A transport/body-decode failure before any content
+                        // arrived is a genuine connection error.
+                        tracing::error!(
+                            target: "llm.deepseek.responses.stream",
+                            url = %api_base,
+                            error = %e,
+                            "Stream chunk error while decoding response body"
+                        );
+                        yield Err(ArrowError::Backend(format!(
+                            "Stream error: {e}"
+                        )));
                     }
                 }
             }
@@ -1464,9 +1552,7 @@ mod tests {
             alias: String::new(),
             thinking: thinking.map(|s| s.to_string()),
             reasoning_effort: reasoning_effort.map(|s| s.to_string()),
-            temperature: None,
-            max_tokens: None,
-            auto_compact_threshold: None,
+            ..Default::default()
         }
     }
 
