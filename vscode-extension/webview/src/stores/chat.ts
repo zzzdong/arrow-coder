@@ -18,6 +18,10 @@ import type {
   TurnStatsParams,
   WorkspaceStateParams,
   UiMessageParams,
+  DocBlock,
+  UserDoc,
+  RefKind,
+  RefRange,
 } from '../protocol';
 
 export interface ToolCall {
@@ -178,9 +182,10 @@ interface State {
   turnStartUsage: UsageParams | null;
   /** Wall-clock timestamp (ms) when the current turn started. */
   turnStartTime: number;
-  /** Shared composer draft so the input toolbar (＠ / 📎 / Skills) can insert
-   *  tokens without owning the textarea. Composer binds this with v-model. */
-  draft: string;
+  /** Shared composer draft as a structured document (ordered blocks of text and
+   *  references). Composer binds this; the textarea only edits trailing/selected
+   *  text blocks, while reference chips push `ref` blocks in document order. */
+  draft: DocBlock[];
   /** A tool-invocation approval prompt awaiting the user's decision. When set,
    *  the running turn is blocked on the host until we reply. */
   pendingPermission: PermissionRequestParams | null;
@@ -224,7 +229,7 @@ export const useChatStore = defineStore('chat', {
     todos: [],
     turnStartUsage: null,
     turnStartTime: 0,
-    draft: '',
+    draft: [],
     pendingPermission: null,
     pendingQuestion: null,
     thinkStreamActive: false,
@@ -639,12 +644,56 @@ export const useChatStore = defineStore('chat', {
         m.compact = { oldTokens, newTokens, summary };
       }
     },
-    async sendPrompt(content: string, references: string[] = []) {
-      if (!content.trim()) {
+    /** Build a [`UserDoc`](protocol) from the structured draft, dropping empty
+     *  trailing/leading text and de-duplicating consecutive identical references. */
+    buildUserDoc(): UserDoc {
+      const blocks: DocBlock[] = [];
+      for (const b of this.draft) {
+        if (b.type === 'text') {
+          // Trim and skip empties, but keep meaningful whitespace between blocks.
+          const t = b.text.replace(/\s+$/, '');
+          if (t.length === 0) {
+            continue;
+          }
+          const last = blocks[blocks.length - 1];
+          if (last && last.type === 'text') {
+            (last as { type: 'text'; text: string }).text += b.text;
+          } else {
+            blocks.push({ type: 'text', text: b.text });
+          }
+        } else {
+          blocks.push(b);
+        }
+      }
+      return { blocks };
+    },
+    /** Serialize a draft into the plain `content` string + `references` list used
+     *  by the legacy core path. Kept for hosts/clients that read `content`. */
+    draftToPlain(): { content: string; references: string[] } {
+      let content = '';
+      const references: string[] = [];
+      for (const b of this.draft) {
+        if (b.type === 'text') {
+          content += b.text;
+        } else {
+          content += `@${b.path} `;
+          references.push(b.path);
+        }
+      }
+      return { content: content.trim(), references };
+    },
+    async sendPrompt(content?: string, references: string[] = []) {
+      // When the composer passes a pre-built plain string (legacy path), honor it.
+      // Otherwise build a structured UserDoc from the live draft.
+      const doc = content === undefined ? this.buildUserDoc() : null;
+      const plain = content === undefined ? this.draftToPlain() : { content, references };
+      if (doc && doc.blocks.length === 0 && !plain.content.trim()) {
         return;
       }
+      const displayText =
+        content !== undefined ? content : plain.content || doc!.blocks.map((b) => (b.type === 'text' ? b.text : `@${b.path}`)).join(' ');
       this.busy = true;
-      this.newUserMessage(content);
+      this.newUserMessage(displayText);
       // Record per-turn baseline so `agent/done` can append a turn stats message
       // with this turn's token delta and wall-clock duration.
       if (!this.turnStartUsage) {
@@ -660,12 +709,20 @@ export const useChatStore = defineStore('chat', {
       // acknowledged by `agent/done` / `agent/error` — it never returns a JSON-RPC
       // response, so awaiting it would time out and surface a spurious error.
       // `busy` is reset when `agent/done`/`agent/error` arrives.
-      // Structured input: the core expands `@`-referenced file paths itself
-      // (the UI only passes paths), so reference handling is shared with the CLI.
+      // Structured input: a `UserDoc` carries position-aware references; the core
+      // expands them IN PLACE (preserving text/reference order), so reference
+      // handling is shared with the CLI. When `doc` is present it takes
+      // precedence over `content` + `references`.
+      const input: { type: 'message'; content: string; references: string[]; doc?: UserDoc } = {
+        type: 'message',
+        content: plain.content,
+        references: plain.references,
+      };
+      if (doc) {
+        input.doc = doc;
+      }
       rpc
-        .request('session/prompt', {
-          input: { type: 'message', content, references },
-        })
+        .request('session/prompt', { input })
         .catch(() => {
           /* reply arrives via notifications; a timeout here is expected */
         });
@@ -961,9 +1018,44 @@ export const useChatStore = defineStore('chat', {
           this.addSystem(`未知命令 \`/${name}\`，输入 \`/help\` 查看可用命令。`);
       }
     },
-    /** Insert helper tokens (e.g. @ mention, 📎 file) into the composer draft. */
+    /** Insert helper text into the composer draft (e.g. @ mention, 📎 file
+     *  placeholder). The text is appended to the trailing text block, or starts
+     *  a new one if the last block is a reference. */
     appendDraft(token: string) {
-      this.draft += token;
+      const blocks = this.draft;
+      if (blocks.length === 0 || blocks[blocks.length - 1].type !== 'text') {
+        blocks.push({ type: 'text', text: token });
+      } else {
+        (blocks[blocks.length - 1] as { type: 'text'; text: string }).text += token;
+      }
+    },
+    /** Append a structured reference block to the draft. `kind` distinguishes a
+     *  whole file, a directory, an editor selection (with line range + snippet),
+     *  or an image. References keep their document order relative to text. */
+    pushReference(ref: {
+      kind: RefKind;
+      path: string;
+      range?: RefRange;
+      snippet?: string;
+      depth?: number;
+    }) {
+      // Ensure there is always at least one text block to type into, so a
+      // reference-first draft still renders an editable text segment (true
+      // interleaving: ref → text is valid, but the user needs a place to type).
+      if (this.draft.length === 0) {
+        this.draft.push({ type: 'text', text: '' });
+      }
+      this.draft.push({ type: 'ref', ...ref });
+    },
+    /** Remove a reference block by index (chip dismissal). */
+    removeReference(index: number) {
+      if (index >= 0 && index < this.draft.length) {
+        this.draft.splice(index, 1);
+      }
+    },
+    /** Clear the composer draft. */
+    clearDraft() {
+      this.draft = [];
     },
   },
 });
