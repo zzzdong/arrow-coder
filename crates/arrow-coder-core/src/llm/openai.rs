@@ -200,13 +200,24 @@ pub struct OpenAIBackend {
 
 impl OpenAIBackend {
     pub fn new(provider: ProviderConfig) -> Result<Self> {
-        let api_key = provider.get_api_key()
-            .ok_or_else(|| ArrowError::Config(
-                format!("API key not found for provider '{}'. Set {} environment variable or configure api_key in config file.",
+        // An API key is required by most hosted providers (OpenAI, Anthropic,
+        // DeepSeek). For local OpenAI-compatible endpoints (e.g. vLLM / ollama)
+        // a key is frequently unnecessary, so a missing key degrades to an empty
+        // string with a warning rather than failing eagerly at session creation.
+        // Callers that genuinely need a key will receive a clear 401 from the
+        // upstream service once a request is made.
+        let api_key = match provider.get_api_key() {
+            Some(key) => key,
+            None => {
+                tracing::warn!(
+                    "No API key configured for provider '{}'; proceeding with an empty key. \
+                     Set {} or configure api_key in the config file if the endpoint requires authentication.",
                     provider.name,
                     provider.api_key_env_var.as_deref().unwrap_or(&format!("{}_API_KEY", provider.name.to_uppercase()))
-                )
-            ))?;
+                );
+                String::new()
+            }
+        };
 
         let client = crate::llm::build_client(provider.verify_tls)?;
 

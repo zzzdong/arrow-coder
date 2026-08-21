@@ -282,9 +282,9 @@ impl Host {
             };
         }
 
-        let (content, references) = match &params.input {
-            arrow_coder_core::core::UserInput::Message { content, references } => {
-                (content.clone(), references.clone())
+        let (content, references, doc) = match &params.input {
+            arrow_coder_core::core::UserInput::Message { content, references, doc } => {
+                (content.clone(), references.clone(), doc.clone())
             }
             _ => unreachable!(),
         };
@@ -503,7 +503,7 @@ impl Host {
             }
             let result = {
                 let mut s = session.lock().await;
-                s.send_stream_structured(content, &references).await
+                s.send_stream_structured(content, &references, doc.as_ref()).await
             };
             running.store(false, Ordering::SeqCst);
 

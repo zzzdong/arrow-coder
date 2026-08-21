@@ -54,8 +54,11 @@ impl AgentSession {
     /// Process structured [`UserInput`]. This is the single entry point used by
     /// every host (VS Code and CLI):
     ///
-    /// - `UserInput::Message { content, references }` runs a normal turn, with
-    ///   the core expanding `@`-referenced file paths into inline content.
+    /// - `UserInput::Message { content, references, doc }` runs a normal turn,
+    ///   with the core expanding references into inline content. When `doc` (a
+    ///   structured, position-aware [`UserDoc`]) is present, it takes precedence
+    ///   over `content` + `references`. Legacy hosts / CLI may still send
+    ///   `content` + `references`, which are expanded and appended at the end.
     /// - `UserInput::Command { name, args }` is recorded as a session event and
     ///   dispatched (compact / undo), so commands are visible and auditable in
     ///   the transcript.
@@ -64,9 +67,9 @@ impl AgentSession {
         input: crate::core::UserInput,
     ) -> Result<Vec<BaseEvent>, String> {
         match input {
-            crate::core::UserInput::Message { content, references } => {
+            crate::core::UserInput::Message { content, references, doc } => {
                 self.loop_
-                    .act_simple_with_refs(content, &references)
+                    .act_simple_with_refs(content, &references, doc.as_ref())
                     .await
             }
             crate::core::UserInput::Command { name, args } => {
@@ -95,12 +98,26 @@ impl AgentSession {
     }
 
     /// Streaming message turn with `@`-referenced file paths (core expands them).
+    /// `doc` (when present) takes precedence as a structured, position-aware
+    /// document.
     pub async fn send_stream_structured(
         &mut self,
         content: impl Into<String>,
         references: &[String],
+        doc: Option<&crate::core::user_doc::UserDoc>,
     ) -> Result<Vec<BaseEvent>, String> {
-        self.loop_.act_simple_streaming_with_refs(content, references).await
+        self.loop_
+            .act_simple_streaming_with_refs(content, references, doc)
+            .await
+    }
+
+    /// Streaming turn from a fully structured [`UserDoc`].
+    pub async fn send_stream_doc(
+        &mut self,
+        doc: &crate::core::user_doc::UserDoc,
+        on_chunk: impl FnMut(String),
+    ) -> Result<Vec<BaseEvent>, String> {
+        self.loop_.act_simple_streaming_with_doc(doc, on_chunk).await
     }
 
     /// Subscribe to the stream of events published by `send`.

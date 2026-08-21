@@ -6,6 +6,7 @@ pub mod paths;
 pub mod rewind;
 pub mod task;
 pub mod types;
+pub mod user_doc;
 
 pub use config::{ConnectorConfig, McpServerConfig, ModelConfig, ProviderConfig, ToolConfig, ToolPermission, VibeConfig};
 pub use task::{ContextSnapshot, TaskGraph, TaskNode, TaskStatus};
@@ -17,3 +18,4 @@ pub use types::{
   ToolChoice, ToolExecId, ToolResultEvent, ToolStreamEvent, TodoEvent, TurnStats, UsageEvent,
   UserInput, UserMessageEvent,
 };
+pub use user_doc::{DocBlock, RefKind, RefRange, UserDoc};

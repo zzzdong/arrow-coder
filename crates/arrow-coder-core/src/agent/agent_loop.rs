@@ -3,8 +3,8 @@ use crate::agent::middleware::{
     PriceLimitMiddleware, ResetReason, TurnLimitMiddleware,
 };
 use crate::core::{
-    AgentStats, AssistantEvent, AvailableFunction, AvailableTool, BaseEvent, CompactEndEvent, ContextBreakdown, FileCheckpointer, LLMChunk, LLMMessage, LLMUsage, Role, ToolResultEvent,
-    ToolStreamEvent, UserMessageEvent, VibeConfig,
+    AgentStats, AssistantEvent, AvailableFunction, AvailableTool, BaseEvent, CompactEndEvent, ContextBreakdown, DocBlock, FileCheckpointer, LLMChunk, LLMMessage, LLMUsage, RefKind, RefRange,
+    Role, ToolResultEvent, ToolStreamEvent, UserMessageEvent, VibeConfig,
 };
 use crate::core::estimate::estimate_tokens;
 use crate::llm::backend::BackendLike;
@@ -724,9 +724,95 @@ impl AgentLoop {
         s.context_breakdown = Some(breakdown);
     }
 
-    /// Expand `@`-referenced file/directory paths into inline content, appended
-    /// to the user message as fenced blocks. The core reads the files (the UI
-    /// only passes paths), so expansion is identical across CLI and VS Code.
+    /// Expand a [`UserDoc`] into the final user message, preserving block order
+    /// so plain text and references keep their relative positions. References are
+    /// expanded *in place* (each `Ref` block becomes fenced content right where
+    /// the user placed it), unlike the legacy `references` list which was
+    /// appended to the end of the message.
+    ///
+    /// Falls back to [`Self::expand_references`] when only `content`/`references`
+    /// are supplied (legacy hosts / CLI).
+    fn expand_doc(&self, doc: &crate::core::user_doc::UserDoc) -> Result<String, String> {
+        let mut out = String::new();
+        for block in &doc.blocks {
+            match block {
+                DocBlock::Text { text } => {
+                    out.push_str(text);
+                }
+                DocBlock::Ref { kind, path, range, snippet, depth } => {
+                    out.push_str(&self.expand_ref_block(kind, path, range.clone(), snippet.clone(), *depth)?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Expand a single reference block into fenced content.
+    fn expand_ref_block(
+        &self,
+        kind: &RefKind,
+        raw: &str,
+        range: Option<RefRange>,
+        snippet: Option<String>,
+        depth: Option<u8>,
+    ) -> Result<String, String> {
+        let path = self.resolve_working_path(raw);
+        let header = match kind {
+            RefKind::Dir => format!("<referenced directory: {}>", raw),
+            RefKind::Image => format!("<referenced image: {}>", raw),
+            RefKind::Selection => match &range {
+                Some(r) => format!("<referenced selection: {} (lines {}-{})>", raw, r.start, r.end),
+                None => format!("<referenced selection: {}>", raw),
+            },
+            RefKind::File => format!("<referenced file: {}>", raw),
+        };
+        match kind {
+            RefKind::Image => {
+                // Images are attached as multimodal content, not inlined as text.
+                // Emit a textual placeholder; the caller attaches the image via
+                // the message's `images` field (see `run_turn`).
+                Ok(format!("\n\n```{}\n<image: {}>\n```", header, raw))
+            }
+            RefKind::Selection => {
+                let body = match (range.as_ref().filter(|r| r.is_valid()), snippet.clone()) {
+                    // Prefer reading live lines from disk using the range.
+                    (Some(r), _) if path.is_file() => {
+                        match self.read_file_range(&path, r) {
+                            Ok(text) => text,
+                            // Fall back to the captured snippet if the file moved.
+                            Err(_) => snippet.unwrap_or_default(),
+                        }
+                    }
+                    (_, Some(s)) => s,
+                    _ => String::new(),
+                };
+                Ok(format!("\n\n```{}\n{}\n```", header, body))
+            }
+            RefKind::Dir => {
+                let max_depth = depth.map(|d| d as usize).unwrap_or(2);
+                let mut buf = String::new();
+                match self.read_dir_recursive(&path, 0, max_depth, &mut buf) {
+                    Ok(()) => Ok(format!("\n\n```{}\n{}\n```", header, buf)),
+                    Err(e) => {
+                        tracing::warn!(target: "agent_loop", "failed to read referenced dir {}: {}", raw, e);
+                        Ok(format!("\n\n```{}\n<unreadable: {}>\n```", header, e))
+                    }
+                }
+            }
+            RefKind::File => {
+                match self.read_reference(&path) {
+                    Ok(text) => Ok(format!("\n\n```{}\n{}\n```", header, text)),
+                    Err(e) => {
+                        tracing::warn!(target: "agent_loop", "failed to read referenced file {}: {}", raw, e);
+                        Ok(format!("\n\n```{}\n<unreadable: {}>\n```", header, e))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Legacy expansion: append all `@`-referenced paths to the end of the
+    /// message as fenced blocks. Retained for CLI / older hosts.
     fn expand_references(&self, content: String, references: &[String]) -> Result<String, String> {
         if references.is_empty() {
             return Ok(content);
@@ -758,12 +844,12 @@ impl AgentLoop {
         }
     }
 
-    /// Read a file or recursively read a directory, returning its text.
+    /// Read a whole file or recursively read a directory, returning its text.
     fn read_reference(&self, path: &std::path::Path) -> Result<String, String> {
         if path.is_dir() {
-            let mut out = String::new();
-            self.read_dir_recursive(path, 0, &mut out)?;
-            Ok(out)
+            let mut buf = String::new();
+            self.read_dir_recursive(path, 0, 2, &mut buf)?;
+            Ok(buf)
         } else if path.is_file() {
             std::fs::read_to_string(path).map_err(|e| e.to_string())
         } else {
@@ -771,13 +857,30 @@ impl AgentLoop {
         }
     }
 
+    /// Read only the lines covered by `range` (1-based inclusive) from a file.
+    fn read_file_range(
+        &self,
+        path: &std::path::Path,
+        range: &RefRange,
+    ) -> Result<String, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let lines: Vec<&str> = text.lines().collect();
+        let lo = range.start.saturating_sub(1);
+        let hi = range.end.min(lines.len());
+        if lo >= hi {
+            return Ok(String::new());
+        }
+        Ok(lines[lo..hi].join("\n"))
+    }
+
     fn read_dir_recursive(
         &self,
         dir: &std::path::Path,
         depth: usize,
+        max_depth: usize,
         out: &mut String,
     ) -> Result<(), String> {
-        if depth > 2 {
+        if depth > max_depth {
             return Ok(());
         }
         let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
@@ -789,7 +892,7 @@ impl AgentLoop {
             let ft = entry.file_type().map_err(|e| e.to_string())?;
             if ft.is_dir() {
                 out.push_str(&format!("{}{}/\n", "  ".repeat(depth), name));
-                self.read_dir_recursive(&entry.path(), depth + 1, out)?;
+                self.read_dir_recursive(&entry.path(), depth + 1, max_depth, out)?;
             } else if ft.is_file() {
                 out.push_str(&format!("{}{}\n", "  ".repeat(depth), name));
             }
@@ -1306,8 +1409,12 @@ impl AgentLoop {
         tools: Vec<Arc<dyn Tool>>,
         user_input: impl Into<String>,
         references: &[String],
+        doc: Option<&crate::core::user_doc::UserDoc>,
     ) -> Result<Vec<BaseEvent>, String> {
-        let user_text = self.expand_references(user_input.into(), references)?;
+        let user_text = match doc {
+            Some(d) => self.expand_doc(d)?,
+            None => self.expand_references(user_input.into(), references)?,
+        };
         self.turn_start = Some(std::time::Instant::now());
         self.turn_base_stats = Some(self.stats.lock().unwrap().clone());
         tracing::info!(target: "agent_loop", "Starting turn {} with user input", self.current_turn + 1);
@@ -1973,7 +2080,7 @@ impl AgentLoop {
         tool: Arc<dyn Tool>,
         user_input: impl Into<String>,
     ) -> Result<Vec<BaseEvent>, String> {
-        self.run_turn(backend, vec![tool], user_input, &[]).await
+        self.run_turn(backend, vec![tool], user_input, &[], None).await
     }
 
     /// Act with explicit backend and multiple tools
@@ -1983,7 +2090,7 @@ impl AgentLoop {
         tools: Vec<Arc<dyn Tool>>,
         user_input: impl Into<String>,
     ) -> Result<Vec<BaseEvent>, String> {
-        self.run_turn(backend, tools, user_input, &[]).await
+        self.run_turn(backend, tools, user_input, &[], None).await
     }
 
     /// Act using stored backend and tools (for TUI)
@@ -1998,22 +2105,41 @@ impl AgentLoop {
             return Err("No tools configured. Use with_tool() or with_tools() to set tools.".to_string());
         }
 
-        self.run_turn(backend.as_ref(), self.tools.clone(), user_input, &[]).await
+        self.run_turn(backend.as_ref(), self.tools.clone(), user_input, &[], None).await
     }
 
     /// Act on a message with `@`-referenced file paths. The core expands the
     /// references into inline content before the turn (the UI only passes paths).
+    ///
+    /// `doc` is the structured [`UserDoc`] (position-aware references). When it is
+    /// `Some`, it takes precedence over `content` + `references`, which are
+    /// retained for backward compatibility (CLI / legacy hosts).
     pub async fn act_simple_with_refs(
         &mut self,
         content: impl Into<String>,
         references: &[String],
+        doc: Option<&crate::core::user_doc::UserDoc>,
     ) -> Result<Vec<BaseEvent>, String> {
         let backend = self.backend.clone()
             .ok_or_else(|| "Backend not configured. Use with_backend() to set a backend.".to_string())?;
         if self.tools.is_empty() {
             return Err("No tools configured. Use with_tool() or with_tools() to set tools.".to_string());
         }
-        self.run_turn(backend.as_ref(), self.tools.clone(), content, references).await
+        self.run_turn(backend.as_ref(), self.tools.clone(), content, references, doc).await
+    }
+
+    /// Act on a fully structured [`UserDoc`]. References are expanded in place,
+    /// preserving their relative position to the surrounding text.
+    pub async fn act_simple_with_doc(
+        &mut self,
+        doc: &crate::core::user_doc::UserDoc,
+    ) -> Result<Vec<BaseEvent>, String> {
+        let backend = self.backend.clone()
+            .ok_or_else(|| "Backend not configured. Use with_backend() to set a backend.".to_string())?;
+        if self.tools.is_empty() {
+            return Err("No tools configured. Use with_tool() or with_tools() to set tools.".to_string());
+        }
+        self.run_turn(backend.as_ref(), self.tools.clone(), String::new(), &[], Some(doc)).await
     }
 
     /// Record a slash command invocation as a session event so it is visible and
@@ -2041,7 +2167,7 @@ impl AgentLoop {
             return Err("No tools configured. Use with_tool() or with_tools() to set tools.".to_string());
         }
 
-        self.run_turn_streaming(backend.as_ref(), self.tools.clone(), user_input, |_| {}, &[]).await
+        self.run_turn_streaming(backend.as_ref(), self.tools.clone(), user_input, |_| {}, &[], None).await
     }
 
     /// Streaming variant of [`AgentLoop::act_simple_with_refs`].
@@ -2049,13 +2175,28 @@ impl AgentLoop {
         &mut self,
         content: impl Into<String>,
         references: &[String],
+        doc: Option<&crate::core::user_doc::UserDoc>,
     ) -> Result<Vec<BaseEvent>, String> {
         let backend = self.backend.clone()
             .ok_or_else(|| "Backend not configured. Use with_backend() to set a backend.".to_string())?;
         if self.tools.is_empty() {
             return Err("No tools configured. Use with_tool() or with_tools() to set tools.".to_string());
         }
-        self.run_turn_streaming(backend.as_ref(), self.tools.clone(), content, |_| {}, references).await
+        self.run_turn_streaming(backend.as_ref(), self.tools.clone(), content, |_| {}, references, doc).await
+    }
+
+    /// Streaming variant of [`AgentLoop::act_simple_with_doc`].
+    pub async fn act_simple_streaming_with_doc(
+        &mut self,
+        doc: &crate::core::user_doc::UserDoc,
+        on_chunk: impl FnMut(String),
+    ) -> Result<Vec<BaseEvent>, String> {
+        let backend = self.backend.clone()
+            .ok_or_else(|| "Backend not configured. Use with_backend() to set a backend.".to_string())?;
+        if self.tools.is_empty() {
+            return Err("No tools configured. Use with_tool() or with_tools() to set tools.".to_string());
+        }
+        self.run_turn_streaming(backend.as_ref(), self.tools.clone(), String::new(), on_chunk, &[], Some(doc)).await
     }
 
     /// Act with streaming response (for TUI)
@@ -2074,7 +2215,7 @@ impl AgentLoop {
             return Err("No tools configured. Use with_tool() or with_tools() to set tools.".to_string());
         }
 
-        self.run_turn_streaming(backend.as_ref(), self.tools.clone(), user_input, on_chunk, &[]).await
+        self.run_turn_streaming(backend.as_ref(), self.tools.clone(), user_input, on_chunk, &[], None).await
     }
 
     /// Run a turn with streaming response
@@ -2086,12 +2227,16 @@ impl AgentLoop {
         user_input: impl Into<String>,
         on_chunk: F,
         references: &[String],
+        doc: Option<&crate::core::user_doc::UserDoc>,
     ) -> Result<Vec<BaseEvent>, String>
     where
         F: FnMut(String),
     {
         let mut on_chunk = on_chunk;
-        let user_text = self.expand_references(user_input.into(), references)?;
+        let user_text = match doc {
+            Some(d) => self.expand_doc(d)?,
+            None => self.expand_references(user_input.into(), references)?,
+        };
         self.turn_start = Some(std::time::Instant::now());
         self.turn_base_stats = Some(self.stats.lock().unwrap().clone());
         tracing::info!(target: "agent_loop", "Starting streaming turn {} with user input", self.current_turn + 1);

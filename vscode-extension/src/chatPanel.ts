@@ -98,24 +98,52 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * The webview appends it to the draft so the user can add an instruction
    * before sending, mirroring the harness `@`-reference flow.
    */
-  public addToChat(uri?: vscode.Uri): void {
-    if (!uri) return;
-    const path = uri.fsPath;
+  /**
+   * "Add to Arrow Coder Chat" from the editor/explorer context menu.
+   *
+   * VS Code passes an array of URIs when multiple resources are selected in the
+   * Explorer (and a single `vscode.Uri` when invoked from the editor or with one
+   * selection). We inject every target as a structured reference so the user can
+   * reference several files/folders at once; an active editor selection is
+   * captured as a line-range reference.
+   */
+  public async addToChat(uris?: vscode.Uri[] | vscode.Uri): Promise<void> {
+    const list: vscode.Uri[] = Array.isArray(uris)
+      ? uris
+      : uris
+        ? [uris]
+        : [];
+    if (list.length === 0) return;
+
     const editor = vscode.window.activeTextEditor;
-    const selection =
-      editor && editor.document.uri.toString() === uri.toString()
-        ? editor.selection
-        : undefined;
-    let payload: Record<string, unknown>;
-    if (selection && !selection.isEmpty) {
-      const startLine = selection.start.line + 1;
-      const endLine = selection.end.line + 1;
-      const snippet = editor!.document.getText(selection);
-      payload = { kind: 'selection', path, startLine, endLine, snippet };
-    } else {
-      payload = { kind: 'path', path };
+
+    for (const uri of list) {
+      const path = uri.fsPath;
+      // Capture an active editor selection when the focused document matches.
+      const selection =
+        editor && editor.document.uri.toString() === uri.toString() && !editor.selection.isEmpty
+          ? editor.selection
+          : undefined;
+
+      let payload: Record<string, unknown>;
+      if (selection) {
+        const startLine = selection.start.line + 1;
+        const endLine = selection.end.line + 1;
+        const snippet = editor!.document.getText(selection);
+        payload = { kind: 'selection', path, startLine, endLine, snippet };
+      } else {
+        // Determine file vs directory without a blocking fs.stat when possible.
+        let isDir = false;
+        try {
+          const stat = await vscode.workspace.fs.stat(uri);
+          isDir = (stat.type & vscode.FileType.Directory) !== 0;
+        } catch {
+          isDir = false;
+        }
+        payload = { kind: 'path', path, isDir };
+      }
+      this.post({ jsonrpc: '2.0', method: 'ui/injectReference', params: payload });
     }
-    this.post({ jsonrpc: '2.0', method: 'ui/injectReference', params: payload });
     this.reveal();
   }
 

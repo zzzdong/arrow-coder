@@ -37,4 +37,8 @@ export type {
   TurnStatsParams,
   SlashCommand,
   UiMessageParams,
+  RefRange,
+  RefKind,
+  DocBlock,
+  UserDoc,
 } from '../../src/protocol';

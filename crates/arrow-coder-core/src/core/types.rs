@@ -230,8 +230,14 @@ pub enum UserInput {
     Message {
         content: String,
         /// File or directory paths referenced via `@`. The core reads them.
+        /// Retained for backward compatibility (CLI / legacy hosts); new hosts
+        /// should prefer `doc` for structured, position-aware references.
         #[serde(default)]
         references: Vec<String>,
+        /// Structured, position-aware document model. When present, it takes
+        /// precedence over `content` + `references` and is expanded in place.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        doc: Option<crate::core::user_doc::UserDoc>,
     },
     /// A slash command (e.g. `/compact`). The core records and executes it.
     Command {
