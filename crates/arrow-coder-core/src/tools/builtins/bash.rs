@@ -155,7 +155,7 @@ impl Tool for BashTool {
     async fn invoke(
         &self,
         args: serde_json::Value,
-        _ctx: InvokeContext,
+        ctx: InvokeContext,
     ) -> Result<ToolOutput> {
         let args: BashArgs = serde_json::from_value(args)?;
 
@@ -224,11 +224,16 @@ impl Tool for BashTool {
         let mut stdout_reader = BufReader::new(stdout).lines();
         let mut stderr_reader = BufReader::new(stderr).lines();
 
-        // Create a shared child for timeout handling
+        // Create a shared child for timeout / cancel handling
         let child_arc: Arc<Mutex<Option<tokio::process::Child>>> = Arc::new(Mutex::new(Some(child)));
         let child_arc_clone = Arc::clone(&child_arc);
 
-        // Use a timeout
+        // The abort signal cloned in so we can stop early when the turn is
+        // cancelled (mirrors deepseek-harness passing the turn's AbortSignal into
+        // tool execution so a long-running command is killed immediately).
+        let mut abort_rx = ctx.abort.clone();
+
+        // Use a timeout, racing against an abort request.
         let wait_result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout),
             async move {
@@ -244,13 +249,33 @@ impl Tool for BashTool {
                     }
                 });
 
-                let _ = tokio::join!(stdout_task, stderr_task);
-                
-                // Take ownership of child from Arc<Mutex<Option<>>>
-                if let Some(mut child) = child_arc_clone.lock().await.take() {
-                    child.wait().await
-                } else {
-                    Ok(std::process::ExitStatus::default())
+                // Wait for the child to finish, unless the turn is cancelled first.
+                let child_wait = async {
+                    let _ = tokio::join!(stdout_task, stderr_task);
+                    if let Some(mut child) = child_arc_clone.lock().await.take() {
+                        child.wait().await
+                    } else {
+                        Ok(std::process::ExitStatus::default())
+                    }
+                };
+
+                tokio::select! {
+                    status = child_wait => status,
+                    _ = async {
+                        match abort_rx.as_mut() {
+                            Some(rx) => { let _ = rx.changed().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                        // Kill the child process group on cancellation.
+                        if let Some(mut child) = child_arc_clone.lock().await.take() {
+                            let _ = child.kill().await;
+                        }
+                    } => {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "command cancelled",
+                        ))
+                    }
                 }
             },
         ).await;
@@ -258,6 +283,23 @@ impl Tool for BashTool {
         let exit_status = match wait_result {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
+                // A cancellation interrupt is reported back to the model as a
+                // `cancelled` tool result (mirrors deepseek-harness: a cancelled
+                // tool still returns its partial output rather than an opaque
+                // error). Other failures stay errors.
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    let stdout_output = stdout_lines.lock().await.join("\n");
+                    let stderr_output = stderr_lines.lock().await.join("\n");
+                    return Ok(ToolOutput::Result(json!({
+                        "command": args.command,
+                        "cancelled": true,
+                        "exit_code": -1,
+                        "stdout": stdout_output,
+                        "stderr": stderr_output,
+                        "working_dir": working_dir.display().to_string(),
+                        "shell": shell,
+                    })));
+                }
                 return Err(ArrowError::Tool(format!("Command failed: {}", e)));
             }
             Err(_) => {

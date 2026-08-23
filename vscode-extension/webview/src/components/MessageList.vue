@@ -51,6 +51,9 @@ watch(
 
 <template>
   <div class="messages" ref="scroller" @scroll="onScroll">
+    <div v-if="store.opening" class="loading">
+      <span class="spinner" /> 正在加载会话…
+    </div>
     <MessageItem v-for="m in store.messages" :key="m.id" :message="m" />
   </div>
 </template>
@@ -60,5 +63,26 @@ watch(
   flex: 1;
   overflow-y: auto;
   padding: 8px;
+}
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px;
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--vscode-panel-border, #444);
+  border-top-color: var(--vscode-progressBar-background, #0e639c);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

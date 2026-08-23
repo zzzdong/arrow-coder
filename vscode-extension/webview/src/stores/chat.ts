@@ -19,6 +19,7 @@ import type {
   TurnStatsParams,
   WorkspaceStateParams,
   UiMessageParams,
+  BuiltinCatalog,
 } from '../protocol';
 
 export interface ToolCall {
@@ -161,6 +162,9 @@ interface State {
   messages: Message[];
   config?: ConfigParams;
   workspace?: WorkspaceStateParams;
+  /** Built-in provider/model catalog from `models/builtin` (for the add-model
+   *  picker: select provider → pick model → enter key). */
+  builtinCatalog?: BuiltinCatalog;
   model: string;
   effort: string;
   /** Built-in slash commands (name + description), sourced from core config. */
@@ -215,6 +219,7 @@ export const useChatStore = defineStore('chat', {
     messages: [],
     config: undefined,
     workspace: undefined,
+    builtinCatalog: undefined,
     model: '',
     effort: '',
     commands: DEFAULT_COMMANDS,
@@ -253,6 +258,23 @@ export const useChatStore = defineStore('chat', {
       // Adopt the core-sourced slash-command registry (fallback to defaults).
       if (cfg.commands && cfg.commands.length > 0) {
         this.commands = cfg.commands;
+      }
+      // Refresh the built-in provider/model catalog so the add-model picker can
+      // offer provider + model dropdowns (only the key is needed after picking).
+      this.fetchBuiltinModels();
+    },
+    setBuiltinCatalog(cat: BuiltinCatalog) {
+      this.builtinCatalog = cat;
+    },
+    /** Request the built-in provider/model catalog from the host. This is a
+     *  true request/response command: the catalog travels in the response
+     *  `result`, so we `await` it directly (no side-channel notification). */
+    async fetchBuiltinModels() {
+      try {
+        const catalog = await rpc.request<BuiltinCatalog>('models/builtin');
+        this.builtinCatalog = catalog;
+      } catch (e) {
+        console.error('[rpc] models/builtin failed:', e);
       }
     },
     setWorkspace(ws: WorkspaceStateParams) {
@@ -305,13 +327,16 @@ export const useChatStore = defineStore('chat', {
       if (!ws) {
         return;
       }
-      // First snapshot after a restart: auto-open the most recent session as the
-      // sole tab, unless the user already opened others.
+      // First snapshot after a restart: auto-open the session the HOST actually
+      // resumed at init (`ws.active_session`), so we show the same conversation
+      // the agent loaded — not a guessed list-order pick. Fall back to the newest
+      // session by creation time when the host didn't report one.
       if (this.openedTabs.size === 0) {
         const all = collectSessions(ws);
-        const last = all[all.length - 1];
-        if (last) {
-          this.openedTabs.add(last.id);
+        const resumed =
+          all.find((s) => s.sessionId === ws.active_session) ?? newestSession(ws);
+        if (resumed) {
+          this.openedTabs.add(resumed.id);
         }
       }
       const prevActive = this.activeTab;
@@ -371,6 +396,7 @@ export const useChatStore = defineStore('chat', {
         .request('session/new')
         .catch(() => {
           this.pendingNewSession = false;
+          this.addSystem('新建会话失败，请重试。');
         });
     },
 
@@ -397,9 +423,8 @@ export const useChatStore = defineStore('chat', {
         });
     },
     /** Close a tab: remember it as closed (dedupe) and open an adjacent one.
-     *  If no tabs remain, we leave the tab list empty (the UI shows an empty
-     *  state with a "New session" affordance) instead of auto-spawning a new
-     *  session — closing the last tab should not surprise the user. */
+     *  If no tabs remain, open a fresh empty session so the UI never gets
+     *  stranded on a blank panel — the user always has a clean tab to type in. */
     async closeTab(id: string) {
       this.closedTabs.add(id);
       this.openedTabs.delete(id);
@@ -411,6 +436,10 @@ export const useChatStore = defineStore('chat', {
       const nextActive = this.tabs[idx] ?? this.tabs[idx - 1];
       if (nextActive) {
         await this.switchTab(nextActive.id);
+      } else {
+        // Last tab closed: spawn a new empty session (clears the timeline and
+        // opens a fresh tab) instead of leaving the panel blank.
+        void this.newSession();
       }
     },
     /** Delete a session (by its bare session id) on the host, then prune it from
@@ -426,9 +455,10 @@ export const useChatStore = defineStore('chat', {
       }
       const activeTab = this.activeTab;
       const wasActive = activeTab?.sessionId === sessionId;
-      // `session/delete` is acknowledged via a `workspace_state` notification,
-      // not a JSON-RPC response; fire it without awaiting.
-      rpc.request('session/delete', { session_id: sessionId }).catch(() => {});
+      // `session/delete` answers with an accepted response and re-emits
+      // `workspace_state`; fire it without awaiting but surface failures.
+      rpc.request('session/delete', { session_id: sessionId })
+        .catch((e: Error) => console.error('[rpc] session/delete failed:', e));
       // Host re-emits workspace_state (handled by onEvent -> setWorkspace ->
       // rebuildTabs). When we deleted the active session, rebuildTabs activates
       // the last remaining tab, but does NOT load its transcript. Open it here
@@ -540,7 +570,10 @@ export const useChatStore = defineStore('chat', {
         last.thinkText += p.text;
         return;
       }
-      // A new reasoning run: start a fresh think message, collapsed.
+      // A new reasoning run: start a fresh think message, AUTO-EXPANDED so the
+      // live stream of reasoning is visible as it arrives. It auto-collapses on
+      // turn completion (see `finishThinking`) unless the user manually toggled
+      // it (which sets `userExpanded`).
       this.thinkStreamActive = true;
       this.messages.push({
         id: nextId(),
@@ -548,7 +581,7 @@ export const useChatStore = defineStore('chat', {
         text: '',
         thinking: '',
         thinkText: p.text,
-        open: false,
+        open: true,
         userExpanded: false,
       });
     },
@@ -644,6 +677,13 @@ export const useChatStore = defineStore('chat', {
       if (!content.trim()) {
         return;
       }
+      // While a session's history is replaying (`opening`), defers sends so the
+      // user's live message doesn't interleave with (and duplicate) the replayed
+      // transcript. `opening` is cleared on `agent/done` once replay finishes.
+      if (this.opening) {
+        this.addSystem('会话仍在加载中，请稍候再发送。');
+        return;
+      }
       this.busy = true;
       this.newUserMessage(content);
       // Record per-turn baseline so `agent/done` can append a turn stats message
@@ -679,10 +719,17 @@ export const useChatStore = defineStore('chat', {
       this.clearFileChanges();
     },
     async cancel() {
-      // Stop the running turn. `busy` is cleared when `agent/done`/`agent/error`
-      // arrives (see App.vue onNotification). The host sends no response to
-      // `session/cancel`, so fire it without awaiting.
-      rpc.request('session/cancel').catch(() => {});
+      // Stop the running turn. The host signals the abort synchronously via
+      // `session/cancel` (Rust flips a watch channel; the running turn breaks at
+      // the next LLM token boundary and stops receiving further tokens), so the
+      // model is interrupted in real time. We optimistically clear `busy` here so
+      // the Stop button swaps back to Send immediately instead of waiting for the
+      // `agent/done`/`agent/error` round-trip. `finishThinking` still runs on that
+      // notification and re-asserts the cleared state.
+      // The host sends no response to `session/cancel`, so fire it without awaiting.
+      this.busy = false;
+      rpc.request('session/cancel')
+        .catch((e: Error) => console.error('[rpc] session/cancel failed:', e));
     },
     /** Show a tool-invocation approval prompt (from `session/permission_request`). */
     setPendingPermission(p: PermissionRequestParams) {
@@ -946,7 +993,8 @@ export const useChatStore = defineStore('chat', {
     /** Manually compact the session context. The host replies with a notification
      *  (CompactStart/CompactEnd), so we don't await a JSON-RPC response. */
     compact() {
-      void rpc.request('session/compact', {}).catch(() => {});
+      void rpc.request('session/compact', {})
+        .catch((e: Error) => console.error('[rpc] session/compact failed:', e));
     },
     /** Show the available slash-commands as a system message in the chat. Uses
      *  the core-sourced command registry as the single source of truth. */

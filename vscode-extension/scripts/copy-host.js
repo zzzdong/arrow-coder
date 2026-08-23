@@ -1,11 +1,12 @@
 // Copies a freshly-built arrow-coder-vscode host binary into the extension's
-// `bin/<platform>-<arch>/` directory so that Tier 2 of the host resolution
-// (bundled binary) works both during local F5 development and in the packaged
-// .vsix.
+// `bin/` directory (a single, platform-agnostic location) so that Tier 2 of
+// the host resolution (bundled binary) works both during local F5 development
+// and in the packaged .vsix.
 //
-// The `bin/<platform>-<arch>/` layout matches the platform-specific package
-// convention (vsce --target), e.g. `bin/win32-x64/arrow-coder-vscode.exe`.
-// `host.ts` probes this exact path during Tier 2 resolution.
+// All platform builds land in the SAME `bin/` directory — there is no
+// `bin/<platform>-<arch>/` split anymore. The `--target` option only controls
+// WHICH cargo build output to copy *from* (the source cargo target dir); the
+// destination is always `bin/<exe>`.
 //
 // Usage:
 //   node scripts/copy-host.js [--target win32-x64|linux-x64|darwin-arm64]
@@ -67,7 +68,9 @@ const cargoProfile = args.profile || (args.release ? 'release' : 'debug');
 const srcDir = path.join(wsRoot, 'target', rustTarget, cargoProfile);
 const src = path.join(srcDir, exe);
 
-const destDir = path.join(extDir, 'bin', targetTuple);
+// All platform builds share a single `bin/` directory (no `<platform>-<arch>`
+// subfolder). `--target` only selects the source cargo output dir above.
+const destDir = path.join(extDir, 'bin');
 const dest = path.join(destDir, exe);
 
 if (!fs.existsSync(src)) {

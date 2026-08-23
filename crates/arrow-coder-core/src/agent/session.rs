@@ -15,24 +15,22 @@ use tokio::sync::broadcast;
 use super::{AgentLoop, AgentLoopConfig};
 
 /// A configured, ready-to-run agent conversation.
+///
+/// Model / reasoning-effort (re)configuration is *not* buffered here. The
+/// single source of truth for config is `ConfigRepository::resolve_model`
+/// (see R2 / `refactor-plan-resources.md` §4) — the host holds any
+/// not-yet-applied alias and applies it via `loop_mut().set_model(...)`
+/// before a turn. This keeps `AgentSession` a pure session facade, matching
+/// harness's "session is passive, config flows through a separate domain".
 pub struct AgentSession {
     loop_: AgentLoop,
-    /// Model alias / reasoning-effort pending a *next-turn* application, so the
-    /// change lands on exactly the next request without rebuilding the session.
-    /// Shared by the VS Code host and the CLI (cross-host config semantics).
-    pending_model: Option<String>,
-    pending_effort: Option<String>,
 }
 
 impl AgentSession {
     /// Build a session from an `AgentLoop`. The loop must be configured with a
     /// backend and tools (e.g. via `with_backend` / `with_tools`).
     pub fn from_loop(loop_: AgentLoop) -> Self {
-        Self {
-            loop_,
-            pending_model: None,
-            pending_effort: None,
-        }
+        Self { loop_ }
     }
 
     /// Build a session from a configuration (loop will need backend/tools
@@ -40,8 +38,6 @@ impl AgentSession {
     pub fn new(config: AgentLoopConfig) -> Self {
         Self {
             loop_: AgentLoop::new(config),
-            pending_model: None,
-            pending_effort: None,
         }
     }
 
@@ -177,54 +173,12 @@ impl AgentSession {
         &mut self.loop_
     }
 
-    // --- Model / effort configuration (cross-host, next-turn semantics) -----
-
-    /// Queue a model alias to take effect on the next turn.
-    pub fn set_pending_model(&mut self, alias: String) {
-        self.pending_model = Some(alias);
-    }
-
-    /// Queue a reasoning-effort to take effect on the next turn.
-    pub fn set_pending_effort(&mut self, effort: String) {
-        self.pending_effort = Some(effort);
-    }
-
-    /// Current pending model alias (if any), else `None`.
-    pub fn pending_model(&self) -> Option<&str> {
-        self.pending_model.as_deref()
-    }
-
-    /// Current pending effort (if any), else `None`.
-    pub fn pending_effort(&self) -> Option<&str> {
-        self.pending_effort.as_deref()
-    }
-
-    /// Apply pending model/effort to the loop's model config, resolving the
-    /// alias against `cfg`. Clears the pending fields. Model selection must be
-    /// validated against `cfg.models` by the caller.
-    pub fn apply_pending_config(&mut self, cfg: &crate::core::config::VibeConfig) {
-        let new_model = self
-            .pending_model
-            .as_ref()
-            .and_then(|alias| cfg.models.iter().find(|m| &m.name == alias).cloned());
-
-        if let Some(mut model) = new_model {
-            if let Some(ref effort) = self.pending_effort {
-                model.reasoning_effort = Some(effort.clone());
-            }
-            self.loop_.set_model(model);
-        } else if let Some(ref effort) = self.pending_effort {
-            self.loop_.set_reasoning_effort(effort.clone());
-        }
-        self.pending_model = None;
-        self.pending_effort = None;
-    }
-
     // --- Runtime turn control ------------------------------------------------
 
     /// Wire the external abort signal so a running turn can be stopped
-    /// gracefully (mirrors deepseek-harness `finish_reason == "stop"`).
-    pub fn set_abort_rx(&mut self, rx: tokio::sync::watch::Receiver<bool>) {
+    /// gracefully (mirrors deepseek-harness `finish_reason == "stop"`). The
+    /// signal carries the cancel cause so the `TurnEnd` reason is accurate.
+    pub fn set_abort_rx(&mut self, rx: tokio::sync::watch::Receiver<crate::session::AbortSignal>) {
         self.loop_.set_abort_rx(rx);
     }
 

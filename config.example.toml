@@ -24,25 +24,30 @@ context_warnings = true
 # above). Each model is SELF-CONTAINED — there is no separate [[providers]] or
 # [[endpoints]] layer.
 #
-# Providers are BUILT IN (not configurable strings) — exactly two kinds:
+# A model's `provider` field REFERENCES a built-in provider PRESET, which
+# supplies the endpoint, reasoning field, key env var, and sampling defaults
+# (temperature/max_tokens). Override any of those with the model's own fields
+# when needed. This keeps the common case terse — `provider = "deepseek"` already
+# implies the official endpoint, reasoning field, key env var, and defaults.
 #
-#   provider = "deepseek"    请求端点固化为 DeepSeek 官方 API
-#                            (https://api.deepseek.com，不可改)。只需选 model_id
-#                            和填 api_key（省略则用 $DEEPSEEK_API_KEY）。
-#   provider = "openai_compatible"
-#                            OpenAI 兼容。可自由配置 endpoint(URL)、api_key、
-#                            model_id 等。endpoint 省略则默认
-#                            https://api.openai.com/v1，key 省略则用
-#                            $OPENAI_API_KEY。
+# Built-in provider presets:
+#   provider = "deepseek"           -> https://api.deepseek.com         (reasoning_content, $DEEPSEEK_API_KEY)
+#   provider = "deepseek-responses" -> https://api.deepseek.com         (reasoning,           $DEEPSEEK_API_KEY)
+#   provider = "openai"             -> https://api.openai.com/v1         (reasoning,           $OPENAI_API_KEY)
+#   provider = "anthropic"          -> https://api.anthropic.com         (no reasoning field,  $ANTHROPIC_API_KEY)
+#   provider = "local"              -> http://127.0.0.1:8080/v1          (OpenAI-compatible,   $OPENAI_API_KEY)
+#   provider = "openai_compatible"  -> alias for "openai" (configurable URL)
 #
 #   name       display identifier (used by active_model / the selector)
-#   model_id   model id sent to the API (e.g. deepseek-chat for v4 flash,
-#              deepseek-reasoner for v4 pro)
-#   endpoint   openai_compatible 才生效；deepseek 忽略此字段（端点已固化）
+#   model_id   model id sent to the API (e.g. deepseek-chat, deepseek-reasoner)
+#   endpoint   OVERRIDES the preset's default URL for EVERY provider — so
+#              `models.toml` fully determines the LLM access info. Omit it to
+#              use the preset's built-in endpoint.
+#   temperature / max_tokens  OVERRIDE the preset defaults when set.
 #
-# Multiple models may use the same provider with different model ids and keys
-# (e.g. a flash and a pro DeepSeek model, or several OpenAI-compatible
-# gateways with freely-configurable URLs).
+# Multiple models may use the same preset with different model ids, keys, or
+# overridden endpoints (e.g. a flash and a pro DeepSeek model, or several
+# OpenAI-compatible gateways pointing at different URLs).
 #
 # You may also define [[models]] inline in this file instead of using a
 # models_file; inline entries and the models file are merged, with the file
@@ -55,17 +60,14 @@ context_warnings = true
 # [[models]]
 # name = "deepseek-flash"
 # model_id = "deepseek-chat"
-# provider = "deepseek"        # 端点固化，不配 endpoint
-# temperature = 0.2
-# max_tokens = 64000
+# provider = "deepseek"        # endpoint/temp/max_tokens 来自预设，无需重复
 # thinking = "high"
 # reasoning_effort = "high"
 #
 # [[models]]
 # name = "local"
 # model_id = "local"
-# provider = "openai_compatible"   # OpenAI 兼容，配 endpoint
-# endpoint = "http://127.0.0.1:8080/v1"
+# provider = "local"           # 预设已含本地 endpoint，无需重复
 # =============================================================================
 
 # Skill paths - additional directories to search for skills

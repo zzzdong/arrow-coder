@@ -123,6 +123,7 @@ pub fn build_invoke_ctx(
         session_dir,
         scratchpad_dir: None,
         user_input_callback: None,
+        abort: None,
     }
 }
 

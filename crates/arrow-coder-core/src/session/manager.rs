@@ -1,81 +1,82 @@
-use crate::core::{AgentStats, LLMMessage};
+//! Session manager — the "active session" facade.
+//!
+//! `SessionManager` owns the *runtime* state of the currently-open session
+//! (the live [`SessionLogger`] driving turns). Session *resources* (identity,
+//! header, lifecycle) are owned by [`LocalSessionRepository`], which this
+//! manager holds. Creation goes through the repository first (it builds the
+//! directory + writes `header.json`), then the logger is bound to that exact
+//! directory — a single source of truth for where a session lives.
+
+use crate::core::{AgentStats, ArrowError, LLMMessage, Result};
+use crate::session::header::{SessionId, SessionOrigin, SessionSummary};
 use crate::session::logger::{SessionLoader, SessionLogger, SessionLoggerConfig};
+use crate::session::repository::{LocalSessionRepository, SessionRepository};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use uuid::Uuid;
 
-/// Manages multiple sessions
+/// Manages the active (runtime) session.
 pub struct SessionManager {
     config: SessionLoggerConfig,
+    repo: LocalSessionRepository,
     active_session: Option<SessionLogger>,
     sessions: HashMap<String, PathBuf>, // session_id -> session_dir
 }
 
 impl SessionManager {
     pub fn new(config: SessionLoggerConfig) -> Self {
+        let repo = LocalSessionRepository::new(config.clone());
         Self {
             config,
+            repo,
             active_session: None,
             sessions: HashMap::new(),
         }
     }
 
-    /// Create a new session
-    pub fn create_session(&mut self) -> String {
-        let session_id = Uuid::new_v4().to_string();
-        let logger = SessionLogger::new(self.config.clone(), session_id.clone());
-
-        if let Some(ref dir) = logger.session_dir() {
-            self.sessions.insert(session_id.clone(), dir.to_path_buf());
-        }
-
-        self.active_session = Some(logger);
-        session_id
+    /// Access the unified session resource repository (R1 seam).
+    pub fn repository(&self) -> &LocalSessionRepository {
+        &self.repo
     }
 
-    /// Load an existing session
-    pub fn load_session(&mut self, session_id: &str) -> crate::core::Result<Vec<LLMMessage>> {
-        // Find session directory
-        let session_dir = if let Some(dir) = self.sessions.get(session_id) {
-            dir.clone()
-        } else {
-            // Try to find in save_dir
-            let save_dir = &self.config.save_dir;
-            if !save_dir.exists() {
-                return Ok(Vec::new());
-            }
-
-            let mut found = None;
-            for entry in std::fs::read_dir(save_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_dir() && path.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.contains(&session_id[..8]))
-                    .unwrap_or(false) {
-                    found = Some(path);
-                    break;
-                }
-            }
-
-            match found {
-                Some(dir) => dir,
-                None => return Ok(Vec::new()),
-            }
-        };
-
-        // Bind the active logger to the EXISTING on-disk directory so that
-        // `load_store` / `append_event` operate on the real history rather than
-        // a freshly generated (empty) timestamped folder.
-        let logger = SessionLogger::from_existing_dir(
-            self.config.clone(),
-            session_id,
-            session_dir.clone(),
-        );
-        let (messages, _) = SessionLoader::load_session(&session_dir)?;
+    /// Create a new session, registering its [`SessionHeader`] resource and
+    /// opening the active logger against the same directory. This is the single
+    /// creation path — no duplicate directory/header writes.
+    pub fn create_session_with(&mut self, origin: SessionOrigin, cwd: Option<String>) -> String {
+        let id = self
+            .repo
+            .create(origin, cwd)
+            .expect("create session resource");
+        let dir = self
+            .repo
+            .dir_of(&id)
+            .expect("session directory exists after create");
+        let logger = SessionLogger::from_existing_dir(self.config.clone(), id.0.clone(), dir.clone());
+        self.sessions.insert(id.0.clone(), dir);
         self.active_session = Some(logger);
-        self.sessions.insert(session_id.to_string(), session_dir);
+        id.0
+    }
 
+    /// Create a new session (legacy compatibility: CLI-origin, no cwd).
+    pub fn create_session(&mut self) -> String {
+        self.create_session_with(SessionOrigin::Cli, None)
+    }
+
+    /// Load an existing session by id (full or partial). Returns the loaded
+    /// messages (kept for backward compatibility with callers that warm a
+    /// context from history).
+    pub fn load_session(&mut self, session_id: &str) -> Result<Vec<LLMMessage>> {
+        let id = self
+            .repo
+            .find_by_partial_id(session_id)?
+            .ok_or_else(|| ArrowError::Config(format!("Session not found: {}", session_id)))?;
+        let dir = self
+            .repo
+            .dir_of(&id)
+            .ok_or_else(|| ArrowError::Config(format!("Session directory missing: {}", id)))?;
+        let logger = SessionLogger::from_existing_dir(self.config.clone(), id.0.clone(), dir.clone());
+        let (messages, _) = SessionLoader::load_session(&dir)?;
+        self.sessions.insert(id.0.clone(), dir);
+        self.active_session = Some(logger);
         Ok(messages)
     }
 
@@ -89,8 +90,13 @@ impl SessionManager {
         self.active_session.clone()
     }
 
+    /// Get mutable active session logger
+    pub fn logger_mut(&mut self) -> Option<&mut SessionLogger> {
+        self.active_session.as_mut()
+    }
+
     /// Save messages to the active session
-    pub fn save_messages(&self, messages: &[LLMMessage]) -> crate::core::Result<()> {
+    pub fn save_messages(&self, messages: &[LLMMessage]) -> Result<()> {
         if let Some(ref session) = self.active_session {
             session.save_messages(messages)?;
         }
@@ -98,7 +104,7 @@ impl SessionManager {
     }
 
     /// Save metadata to the active session
-    pub fn save_metadata(&self, stats: &AgentStats) -> crate::core::Result<()> {
+    pub fn save_metadata(&self, stats: &AgentStats) -> Result<()> {
         if let Some(ref session) = self.active_session {
             session.save_metadata(stats)?;
         }
@@ -106,33 +112,50 @@ impl SessionManager {
     }
 
     /// Append a message to the active session
-    pub fn append_message(&self, message: &LLMMessage) -> crate::core::Result<()> {
+    pub fn append_message(&self, message: &LLMMessage) -> Result<()> {
         if let Some(ref session) = self.active_session {
             session.append_message(message)?;
         }
         Ok(())
     }
 
-    /// List all available sessions
-    pub fn list_sessions(&self) -> crate::core::Result<Vec<crate::session::logger::SessionInfo>> {
-        SessionLoader::list_sessions(&self.config.save_dir)
+    /// List sessions via the repository (most-recently-updated first).
+    pub fn list_sessions(&self, cwd: Option<&std::path::Path>) -> Result<Vec<SessionSummary>> {
+        self.repo.list(&crate::session::header::SessionFilter {
+            cwd: cwd.map(|p| p.to_path_buf()),
+            origin: None,
+            query: None,
+            limit: None,
+        })
     }
 
-    /// Close the active session
+    /// Close the active session (drops the live logger).
     pub fn close_session(&mut self) {
         self.active_session = None;
     }
 
-    /// Delete a session
-    pub fn delete_session(&mut self, session_id: &str) -> crate::core::Result<()> {
-        if let Some(dir) = self.sessions.remove(session_id) {
-            std::fs::remove_dir_all(dir)?;
-        }
+    /// Delete a session by id (full or partial).
+    pub fn delete_session(&mut self, session_id: &str) -> Result<()> {
+        let id = self
+            .repo
+            .find_by_partial_id(session_id)?
+            .ok_or_else(|| ArrowError::Config(format!("Session not found: {}", session_id)))?;
+        self.sessions.remove(&id.0);
+        self.repo.delete(&id)
+    }
 
-        if self.active_session.as_ref().map(|s| s.session_id()) == Some(session_id) {
-            self.active_session = None;
+    /// Set the title for the active session (writes through to the header).
+    pub fn set_active_title(&self, title: &str) -> Result<()> {
+        if let Some(id) = self.active_session_id() {
+            let id = SessionId::from(id.to_string());
+            self.repo.update_meta(
+                &id,
+                &crate::session::header::HeaderPatch {
+                    title: Some(title.to_string()),
+                    cwd: None,
+                },
+            )?;
         }
-
         Ok(())
     }
 }

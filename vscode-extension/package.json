@@ -101,7 +101,7 @@
         "arrowCoder.server.path": {
           "type": "string",
           "default": "arrow-coder-vscode",
-          "description": "Path or command name of the arrow-coder-vscode host binary (the Rust workspace crate). Resolution order: (1) this setting — an absolute/relative file, or a directory containing the binary; (2) the bundled binary inside the extension at `bin/<platform>-<arch>/` (e.g. `bin/win32-x64/`), falling back to `bin/` and `bin/<platform>/`; (3) the bare command name resolved via PATH. Leave default to use the bundled build."
+          "description": "Path or command name of the arrow-coder-vscode host binary (the Rust workspace crate). Resolution order: (1) this setting — an absolute/relative file, or a directory containing the binary; (2) the bundled binary inside the extension at `bin/` (a single platform-agnostic directory), falling back to the legacy `bin/<platform>-<arch>/` layout for already-packaged .vsix files; (3) the bare command name resolved via PATH. Leave default to use the bundled build."
         },
         "arrowCoder.server.autoApprove": {
           "type": "boolean",

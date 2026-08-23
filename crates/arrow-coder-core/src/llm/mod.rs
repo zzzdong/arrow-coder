@@ -33,7 +33,7 @@ pub fn init_backend(
             let backend = anthropic::AnthropicBackend::new(provider_config.clone())?;
             Ok(Arc::new(backend))
         }
-        "deepseek-chat" => {
+        "deepseek" => {
             let backend = deepseek::DeepSeekChatBackend::new(provider_config.clone())?;
             Ok(Arc::new(backend))
         }

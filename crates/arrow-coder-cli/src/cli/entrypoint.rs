@@ -5,9 +5,9 @@ use crate::cli::commands::CommandRegistry;
 use arrow_coder_core::core::config::VibeConfig;
 use arrow_coder_core::core::error::{ArrowError, Result};
 use arrow_coder_core::core::BaseEvent;
+use arrow_coder_core::core::{ConfigRepository, LocalConfigRepository};
 use arrow_coder_core::session::{
-    LastSessionManager, ResumeSessionManager, SavedSessionsManager, SessionManager,
-    SessionLoggerConfig,
+    LastSessionManager, ResumeSessionManager, SessionManager, SessionLoggerConfig,
 };
 use arrow_coder_core::skills::SkillManager;
 use crate::tui::App;
@@ -21,24 +21,18 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
         return run_setup().await;
     }
 
+    // 统一配置接缝（R2）：整个 CLI 进程只解析一次配置，host/CLI 不再各持
+    // 一份后端加载逻辑。show_config / list_models 直接投影 repo，不重复 load。
+    let repo = build_config_repo(&args);
+    let config = repo.snapshot();
+
     if args.config {
-        return show_config().await;
+        return show_config(&repo).await;
     }
 
     if args.list_models {
-        return list_models().await;
+        return list_models(&repo).await;
     }
-
-    // Load configuration
-    let config = match VibeConfig::load_resolved() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            if !args.is_programmatic() {
-                eprintln!("Warning: Failed to load configuration: {}. Using defaults.", e);
-            }
-            VibeConfig::with_defaults()
-        }
-    };
 
     // Determine working directory
     let working_dir = args
@@ -59,8 +53,7 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
     };
 
     let mut session_manager = SessionManager::new(session_config.clone());
-    let saved_manager = SavedSessionsManager::new(session_config.clone());
-    let resume_manager = ResumeSessionManager::new(saved_manager);
+    let resume_manager = ResumeSessionManager::new(session_config.clone());
     let last_session = LastSessionManager::new(&arrowcode_home);
 
     // Handle resume
@@ -97,6 +90,7 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
     if args.is_programmatic() {
         run_programmatic_mode(
             args,
+            &repo,
             config,
             session_manager,
             skill_manager,
@@ -105,6 +99,7 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
     } else {
         run_interactive_mode(
             args,
+            &repo,
             config,
             session_manager,
             command_registry,
@@ -144,9 +139,42 @@ async fn run_setup() -> Result<()> {
     Ok(())
 }
 
+/// 构建统一配置仓库（R2）。整个 CLI 进程解析一次，取代过去各命令
+/// 各自 `VibeConfig::load_resolved()` 的散落——那是多份重复加载的病根。
+fn build_config_repo(args: &CliArgs) -> LocalConfigRepository {
+    match LocalConfigRepository::load() {
+        Ok(repo) => repo,
+        Err(e) => {
+            if !args.is_programmatic() {
+                eprintln!(
+                    "Warning: Failed to load configuration: {}. Using defaults.",
+                    e
+                );
+            }
+            let path = VibeConfig::user_config_path().unwrap_or_else(|| PathBuf::from("config.toml"));
+            LocalConfigRepository::new(VibeConfig::with_defaults(), path, None)
+        }
+    }
+}
+
+/// 解析当前激活模型：经 `ConfigRepository` 取 active 别名再 resolve。
+/// 取代原 `VibeConfig::get_active_model()` 的重复解析路径，统一入口。
+fn resolve_active_model(repo: &LocalConfigRepository) -> Result<arrow_coder_core::core::config::ModelConfig> {
+    let alias = repo
+        .current_agent_config()?
+        .active_model
+        .ok_or_else(|| {
+            ArrowError::Config(
+                "No active model configured. Please set 'active_model' in your config file."
+                    .to_string(),
+            )
+        })?;
+    repo.resolve_model(&alias)
+}
+
 /// Show current configuration
-async fn show_config() -> Result<()> {
-    let config = VibeConfig::load_resolved()?;
+async fn show_config(repo: &LocalConfigRepository) -> Result<()> {
+    let config = repo.snapshot();
 
     let arrowcode_home = VibeConfig::arrowcode_home()
         .map(|p| p.display().to_string())
@@ -157,10 +185,11 @@ async fn show_config() -> Result<()> {
     println!("  Active Model: {:?}", config.active_model);
     println!("  Default Agent: {}", config.default_agent);
     println!("\nModels:");
-    for model in &config.models {
+    // 经 repo 投影模型列表（轻量摘要，不含密钥）。
+    for m in repo.list_models()? {
         println!(
             "  - {} (model_id: {}, provider: {})",
-            model.name, model.model_id, model.provider
+            m.name, m.model_id, m.provider
         );
     }
     println!("\nSkill Paths:");
@@ -172,19 +201,18 @@ async fn show_config() -> Result<()> {
 }
 
 /// List available models
-async fn list_models() -> Result<()> {
-    let config = VibeConfig::load_resolved()?;
-
+async fn list_models(repo: &LocalConfigRepository) -> Result<()> {
+    let agent = repo.current_agent_config()?;
     println!("Available Models:");
-    for model in &config.models {
-        let marker = if Some(&model.name) == config.active_model.as_ref() {
+    for m in repo.list_models()? {
+        let marker = if Some(&m.name) == agent.active_model.as_ref() {
             "*"
         } else {
             " "
         };
         println!(
             "{} {} (model_id: {}, provider: {})",
-            marker, model.name, model.model_id, model.provider
+            marker, m.name, m.model_id, m.provider
         );
     }
 
@@ -194,6 +222,7 @@ async fn list_models() -> Result<()> {
 /// Run in programmatic mode (non-interactive)
 async fn run_programmatic_mode(
     args: CliArgs,
+    repo: &LocalConfigRepository,
     config: VibeConfig,
     session_manager: SessionManager,
     skill_manager: SkillManager,
@@ -202,13 +231,8 @@ async fn run_programmatic_mode(
         .effective_prompt()
         .ok_or_else(|| arrow_coder_core::core::ArrowError::Config("No prompt provided".to_string()))?;
 
-    // Get model configuration
-    let model_config = config
-        .get_active_model()
-        .cloned()
-        .ok_or_else(|| ArrowError::Config(
-            "No active model configured. Please set 'active_model' in your config file.".to_string()
-        ))?;
+    // Get model configuration — 经 repo 解析激活模型（消除 get_active_model 重复逻辑）。
+    let model_config = resolve_active_model(repo)?;
 
     // Resolve the runtime backend config: model -> endpoint -> provider family.
     let provider_config = config.resolve_provider(&model_config)?;
@@ -224,7 +248,7 @@ async fn run_programmatic_mode(
     let mut agent_loop = arrow_coder_core::agent::AgentLoop::new(arrow_coder_core::agent::AgentLoopConfig {
         max_turns: args.max_turns.or(Some(10)),
         max_price: args.max_price,
-        max_session_tokens: args.max_tokens.or(model_config.max_tokens.map(|t| t as u64)),
+        max_session_tokens: args.max_tokens.or(model_config.effective_max_tokens().map(|t| t as u64)),
         auto_compact_threshold: model_config.auto_compact_threshold,
     })
     .with_model(model_config.clone());
@@ -350,18 +374,14 @@ async fn run_programmatic_mode(
 /// Run in interactive mode with TUI
 async fn run_interactive_mode(
     args: CliArgs,
+    repo: &LocalConfigRepository,
     config: VibeConfig,
     session_manager: SessionManager,
     _command_registry: CommandRegistry,
     skill_manager: SkillManager,
 ) -> Result<()> {
-    // Get model configuration
-    let model_config = config
-        .get_active_model()
-        .cloned()
-        .ok_or_else(|| ArrowError::Config(
-            "No active model configured. Please set 'active_model' in your config file.".to_string()
-        ))?;
+    // Get model configuration — 经 repo 解析激活模型（消除 get_active_model 重复逻辑）。
+    let model_config = resolve_active_model(repo)?;
 
     // Resolve the runtime backend config: model -> endpoint -> provider family.
     let provider_config = config.resolve_provider(&model_config)?;
@@ -411,7 +431,7 @@ async fn run_interactive_mode(
     let mut agent_loop = arrow_coder_core::agent::AgentLoop::new(arrow_coder_core::agent::AgentLoopConfig {
         max_turns: args.max_turns.or(Some(10)),
         max_price: args.max_price,
-        max_session_tokens: args.max_tokens.or(model_config.max_tokens.map(|t| t as u64)),
+        max_session_tokens: args.max_tokens.or(model_config.effective_max_tokens().map(|t| t as u64)),
         auto_compact_threshold: model_config.auto_compact_threshold,
     })
     .with_backend(backend)

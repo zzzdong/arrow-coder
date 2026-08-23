@@ -5,7 +5,7 @@
 //! `{"type":"error",...}` lines rather than crashing the process, so the
 //! extension can recover.
 
-use arrow_coder_vscode::{Host, Request};
+use arrow_coder_vscode::{Event, HandleOutcome, Host, Request};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[tokio::main]
@@ -47,30 +47,38 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        let method = req.method.clone();
         let req_id = req.id.clone();
-        let events = host.handle(req).await;
+        // `handle` returns the response outcome (result/error) plus any events
+        // to emit as notifications.
+        let outcome = host.handle(req).await;
+        let (result, events) = match outcome {
+            HandleOutcome::Answer { result, events } => (Ok(result), events),
+            HandleOutcome::Error { message, events } => (Err(message), events),
+        };
 
-        // Emit the notifications the handler produced.
+        // Emit the notifications the handler produced (streaming output, state
+        // pushes, etc.).
         for ev in &events {
             host.emit(ev).await;
         }
 
-        // `config/update` is one of the rare methods the caller awaits a real
-        // response to; send it so the webview doesn't time out. Success when no
-        // error event was produced, otherwise relay the first error message.
-        if method == "config/update" {
-            let result = if let Some(err) = events.iter().find_map(|ev| match ev {
-                arrow_coder_vscode::Event::Error { error } => Some(error.clone()),
+        // Every request that carries an `id` gets a real response back. This is
+        // what makes "one request → one response" hold end-to-end: the webview's
+        // `request()` can await it instead of relying on a timeout, and failures
+        // (including `unknown method`) surface immediately as `response.error`
+        // rather than being silently swallowed until the deadline. An `Error`
+        // event inside the notification stream (e.g. `not initialized`) takes
+        // precedence over a success result.
+        if let Some(id) = req_id {
+            let final_result = if let Some(err) = events.iter().find_map(|ev| match ev {
+                Event::Error { error } => Some(error.clone()),
                 _ => None,
             }) {
                 Err(err)
             } else {
-                Ok(())
+                result
             };
-            if let Some(id) = req_id {
-                host.emit_response(&id, result).await;
-            }
+            host.emit_response_value(&id, final_result).await;
         }
     }
 

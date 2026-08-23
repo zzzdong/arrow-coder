@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use crate::core::error::Result;
 use crate::core::{ToolPermission as CoreToolPermission, VibeConfig};
+use crate::session::{AbortSignal, AgentCancelCause};
+use tokio::sync::watch;
 
 /// One selectable option offered by a user question (mirrors deepseek-harness
 /// `AskUserQuestionOption`).
@@ -73,6 +75,26 @@ pub struct InvokeContext {
     /// Optional callback for tools that need to ask the user a question
     /// (`ask_user_question`). When `None`, such tools report an error.
     pub user_input_callback: Option<UserInputCallback>,
+    /// Optional abort signal, mirroring deepseek-harness passing the turn's
+    /// `AbortSignal` into tool execution. Long-running tools (e.g. `bash`)
+    /// poll this and stop early (killing child processes) when the user
+    /// cancels the turn. `None` means cancellation is not observable here.
+    pub abort: Option<watch::Receiver<AbortSignal>>,
+}
+
+impl InvokeContext {
+    /// If an external abort has been requested, return the cancel cause; else `None`.
+    /// Mirrors harness `signal.throwIfAborted()`-style polling at the tool level.
+    pub fn abort_requested(&self) -> Option<AgentCancelCause> {
+        self.abort.as_ref().and_then(|rx| {
+            let sig = rx.borrow();
+            if sig.requested {
+                Some(sig.cause)
+            } else {
+                None
+            }
+        })
+    }
 }
 
 impl std::fmt::Debug for InvokeContext {

@@ -78,6 +78,11 @@ pub enum Event {
     /// render the model/thinking selectors and reflect the current selection.
     #[serde(rename = "config")]
     Config(ConfigPayload),
+    /// Built-in provider model catalog. Emitted in response to `models/builtin`
+    /// so the UI can render the "select provider → pick model" dropdowns without
+    /// hard-coding model ids. Mirrors deepseek-harness's provider model picker.
+    #[serde(rename = "models_builtin")]
+    ConfigBuiltin(BuiltinCatalogPayload),
     /// A workspace registry snapshot. Emitted after `session/create`,
     /// `workspace/list`, and whenever a session is opened / closed / renamed so
     /// the frontend can rebuild its workspace switcher and conversation index.
@@ -119,6 +124,26 @@ pub enum Event {
     /// `appendUiMessage` path instead of re-deriving role pairing itself.
     #[serde(rename = "ui_message")]
     UiMessage(arrow_coder_core::session::UiMessage),
+    /// A lightweight list of all sessions (header-only, no event log). Maps to
+    /// `SessionRepository::list` — the resource truth lives in `header.json`,
+    /// not in the `WorkspaceIndex` copy. Used by the C/S history browser.
+    #[serde(rename = "session_list")]
+    SessionList(SessionListPayload),
+    /// Full detail of one session: header + projected UI messages (no raw log).
+    /// Maps to `get_header` + `SessionStore::load` (R1 已删 `read_from`).
+    #[serde(rename = "session_detail")]
+    SessionDetail(SessionDetailPayload),
+    /// One turn's projection. Maps to `SessionQuery::get_turn_window` (R3).
+    #[serde(rename = "session_turn")]
+    TurnView(TurnViewPayload),
+    /// Search hits over a session's event log. Maps to `SessionQuery::search_events` (R3).
+    #[serde(rename = "session_search")]
+    SearchHits(SearchHitsPayload),
+    /// Host readiness signal. Emitted in reply to the webview's `host/ready`
+    /// notification once the host has finished initializing its first session.
+    /// The webview uses it to gate the first auto-open of the resumed session.
+    #[serde(rename = "host_status")]
+    Status(StatusPayload),
 }
 
 /// Payload for a `agent/usage` notification — a snapshot of the session's token
@@ -276,6 +301,52 @@ pub struct WorkspaceStatePayload {
     pub active_session: Option<String>,
 }
 
+/// Payload for `session/list`: a lightweight header-only listing of all sessions.
+/// The resource truth lives in `header.json` (via `SessionRepository::list`),
+/// deliberately NOT the `WorkspaceIndex` copy — that is the R4 double-track fix.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionListPayload {
+    pub sessions: Vec<arrow_coder_core::session::SessionSummary>,
+}
+
+/// Payload for `session/get`: one session's header plus its projected UI
+/// transcript (not the raw event log). Mirrors harness `readFrom` projection.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionDetailPayload {
+    pub header: arrow_coder_core::session::SessionHeader,
+    pub messages: Vec<arrow_coder_core::session::UiMessage>,
+}
+
+/// Payload for `session/turn`: one turn's projected view (R3).
+#[derive(Debug, Clone, Serialize)]
+pub struct TurnViewPayload {
+    pub turn: u32,
+    pub messages: Vec<arrow_coder_core::session::UiMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<arrow_coder_core::core::TurnStats>,
+}
+
+/// Payload for `session/search`: hits over a session's event log (R3).
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHitsPayload {
+    pub session_id: String,
+    pub query: String,
+    pub hits: Vec<arrow_coder_core::session::EventHit>,
+}
+
+/// Payload for the `host_status` notification: signals whether the host has
+/// finished initializing its first (auto-resumed) session so the webview can
+/// safely auto-open it. Also carries the session id the host actually loaded,
+/// so the UI opens the right conversation instead of guessing by list order.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusPayload {
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// A JSON-RPC 2.0 notification: a request-shaped message with no `id`, used by
 /// the host to push events to the frontend (webview) without expecting a reply.
 ///
@@ -304,6 +375,7 @@ impl Event {
             Event::Done => "agent/done",
             Event::Error { .. } => "agent/error",
             Event::Config { .. } => "session/config",
+            Event::ConfigBuiltin { .. } => "models/builtin",
             Event::WorkspaceState { .. } => "session/workspace_state",
             Event::Injected { .. } => "session/injected",
             Event::FileChanges { .. } => "agent/file_changes",
@@ -312,6 +384,11 @@ impl Event {
             Event::Usage { .. } => "agent/usage",
             Event::Todo { .. } => "agent/todo",
             Event::UiMessage { .. } => "agent/ui_message",
+            Event::SessionList { .. } => "session/list",
+            Event::SessionDetail { .. } => "session/get",
+            Event::TurnView { .. } => "session/turn",
+            Event::SearchHits { .. } => "session/search",
+            Event::Status { .. } => "host/status",
         }
     }
 
@@ -427,6 +504,45 @@ pub struct ConfigPayload {
     pub models_file: Option<String>,
 }
 
+/// A single built-in model entry within a provider's catalog. Carries the
+/// model id the API expects plus sensible UI defaults so adding a model is a
+/// one-click "pick + enter key" flow (mirrors deepseek-harness picking a model
+/// from a provider's dropdown).
+#[derive(Debug, Clone, Serialize)]
+pub struct BuiltinModelPayload {
+    /// Model id sent to the API (e.g. `deepseek-chat`, `deepseek-v4-flash`).
+    pub model_id: String,
+    /// Human-readable label for the dropdown.
+    pub label: String,
+    /// Suggested `thinking` preset when this model is added.
+    #[serde(default)]
+    pub thinking: Option<String>,
+    /// Suggested `reasoning_effort` when this model is added.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+}
+
+/// A provider entry in the built-in catalog: its name, the env var that holds
+/// its API key, and the models it offers.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuiltinProviderPayload {
+    /// Provider preset name (references `builtin_provider`).
+    pub provider: String,
+    /// Environment variable the key is read from (e.g. `DEEPSEEK_API_KEY`).
+    pub key_env: String,
+    /// Models offered under this provider.
+    pub models: Vec<BuiltinModelPayload>,
+}
+
+/// Response payload for a `models/builtin` event: the full catalog of built-in
+/// providers and the models each one offers, so the settings UI can render
+/// provider + model dropdowns without hard-coding ids.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuiltinCatalogPayload {
+    /// Built-in providers and their models.
+    pub providers: Vec<BuiltinProviderPayload>,
+}
+
 /// The full configuration view sent to the webview settings panel and echoed
 /// back in `config/update`. Round-trips the config structures directly so the
 /// editor can add/remove models and tweak model details without touching TOML
@@ -510,6 +626,27 @@ pub struct RenameSessionParams {
     pub session_id: Option<String>,
 }
 
+/// Parameters for `session/get` / `session/search` (target a single session).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionIdParam {
+    pub session_id: String,
+}
+
+/// Parameters for `session/turn` (a single turn within a session).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TurnParam {
+    pub session_id: String,
+    /// 1-based turn index.
+    pub turn: u32,
+}
+
+/// Parameters for `session/search` (query a session's event log).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchParam {
+    pub session_id: String,
+    pub query: String,
+}
+
 /// Parameters for `session/delete`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeleteSessionParams {
@@ -529,4 +666,51 @@ pub struct PermissionResponseParams {
     /// `once` | `session` | `always` — how far the approval should be remembered.
     #[serde(default)]
     pub approval_type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_coder_core::session::header::{SessionHeader, SessionId, SessionOrigin};
+
+    /// R4 验收：新增的资源协议方法都应映射到正确的 `notification_method`，
+    /// 前端据此订阅。Event 本身只 Serialize（单向推送），故直接构造变体断言。
+    #[test]
+    fn session_resource_event_methods() {
+        // session/list
+        assert_eq!(
+            Event::SessionList(SessionListPayload { sessions: vec![] }).notification_method(),
+            "session/list"
+        );
+        // session/get
+        let header = SessionHeader::new(SessionId::from("x"), SessionOrigin::Cli);
+        assert_eq!(
+            Event::SessionDetail(SessionDetailPayload {
+                header,
+                messages: vec![],
+            })
+            .notification_method(),
+            "session/get"
+        );
+        // session/turn
+        assert_eq!(
+            Event::TurnView(TurnViewPayload {
+                turn: 1,
+                messages: vec![],
+                stats: None
+            })
+            .notification_method(),
+            "session/turn"
+        );
+        // session/search
+        assert_eq!(
+            Event::SearchHits(SearchHitsPayload {
+                session_id: "x".to_string(),
+                query: "q".to_string(),
+                hits: vec![],
+            })
+            .notification_method(),
+            "session/search"
+        );
+    }
 }

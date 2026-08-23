@@ -1,68 +1,85 @@
-# Arrow Code — Standalone Model Definitions
-# Referenced by `models_file = "models.example.toml"` in config.toml.
+# models.example.toml
 #
-# This file ONLY contains [[models]]. Each model is self-contained.
+# A standalone model-definition file, referenced from the main config via:
 #
-# Providers are BUILT IN (not configurable strings) — exactly two kinds:
+#   models_file = "models.toml"
 #
-#   provider = "deepseek"            请求端点固化为 DeepSeek 官方 API
-#                                    (https://api.deepseek.com，不可改)。只需选
-#                                    model_id 和填 api_key。
-#   provider = "openai_compatible"   OpenAI 兼容。可自由配置 endpoint(URL)、
-#                                    api_key、model_id 等。
+# Each model REFERENCES a built-in provider preset via `provider`. The preset
+# supplies the endpoint, reasoning field, key env var, and sampling defaults —
+# so the common case stays terse. Override any of those with the model's own
+# fields (`endpoint`, `temperature`, `max_tokens`, …) when you need to.
 #
-# Model fields:
-#   name       display identifier (used in the selector and active_model)
-#   model_id   model id sent to the API (e.g. deepseek-chat for v4 flash,
-#              deepseek-reasoner for v4 pro)
-#   provider   "deepseek" | "openai_compatible"
-#   endpoint   openai_compatible 才需要：API base URL（省略则默认
-#              https://api.openai.com/v1）；deepseek 忽略此字段（端点已固化）
-#   api_key    可省略；省略时用 $DEEPSEEK_API_KEY / $OPENAI_API_KEY
+# Built-in provider presets:
+#   deepseek            -> https://api.deepseek.com        (kind "deepseek",        reasoning_content, DEEPSEEK_API_KEY, temp 0.7, top_p 0.95, 64000 tok)
+#   deepseek-responses  -> https://api.deepseek.com        (kind "deepseek-responses", reasoning,      DEEPSEEK_API_KEY, temp 0.7, top_p 0.95, 64000 tok)
+#   openai              -> https://api.openai.com/v1        (kind "openai",          reasoning,         OPENAI_API_KEY,    temp 0.7, 8192 tok)
+#   anthropic           -> https://api.anthropic.com        (kind "anthropic",       no reasoning field,ANTHROPIC_API_KEY, temp 0.7, 8192 tok)
+#   local               -> http://127.0.0.1:8080/v1         (kind "openai",          no reasoning field,OPENAI_API_KEY(local),temp 0.7, 4096 tok)
+#   openai_compatible   -> alias for "openai" (configurable URL)
+#
+# DeepSeek's official sampling guidance: reasoning at the `max` effort tier,
+# temperature = 1.0, top_p = 0.95. The deepseek preset already defaults top_p
+# to 0.95, so a model only needs to set temperature=1.0 and reasoning_effort="max".
 
-# =============================================================================
-# deepseek provider —— 端点固化官方 API，只配 model_id + api_key
-# =============================================================================
-# DeepSeek v4 flash
+# --- Reference a built-in provider: endpoint + temperature + max_tokens all
+#     come from the preset; you only set the model id. ---
 [[models]]
 name = "deepseek-flash"
 model_id = "deepseek-chat"
 provider = "deepseek"
-# api_key = "sk-xxx"                     # 留空则用 $DEEPSEEK_API_KEY
-temperature = 0.2
-max_tokens = 64000
-thinking = "high"                        # 思考模式开关/预设档位
-reasoning_effort = "high"                # 推理强度（deepseek: off | high | max）
+thinking = "high"
+reasoning_effort = "high"
+# temperature / max_tokens omitted -> inherit preset defaults (0.7 / 64000)
+# top_p omitted -> inherits the deepseek preset default (0.95)
+auto_compact_threshold = 64000
 
-# DeepSeek v4 pro（同一 provider，不同 model_id，可用不同 key）
+# --- DeepSeek official sampling (max effort tier, temp 1.0, top_p 0.95) ---
+[[models]]
+name = "deepseek-v4-flash"
+model_id = "deepseek-v4-flash"
+provider = "deepseek"
+reasoning_effort = "max"      # DeepSeek "max" effort tier
+temperature = 1.0
+top_p = 0.95
+max_tokens = 256000
+
 [[models]]
 name = "deepseek-pro"
 model_id = "deepseek-reasoner"
-provider = "deepseek"
-temperature = 0.2
-max_tokens = 64000
+provider = "deepseek"            # same preset, different model id + effort
 thinking = "high"
 reasoning_effort = "max"
 
-# =============================================================================
-# openai_compatible provider —— 可自由配置 endpoint / key / model_id
-# =============================================================================
-# 通过兼容网关转发到 DeepSeek（或任意 OpenAI 兼容服务）
 [[models]]
-name = "my-gateway"
-model_id = "deepseek-chat"               # 网关可转发到任意模型 id
+name = "gpt4o"
+model_id = "gpt-4o"
+provider = "openai"              # uses the OpenAI preset endpoint + key env
+
+# --- A local OpenAI-compatible server: the `local` preset already points at
+#     the default localhost URL, so no endpoint needed. ---
+[[models]]
+name = "local"
+model_id = "local-model"
+provider = "local"
+temperature = 0.7
+max_tokens = 4096
+auto_compact_threshold = 8000
+
+# --- Override the preset's endpoint: repoint DeepSeek at a custom gateway.
+#     `models.toml` can fully determine the LLM access info. ---
+[[models]]
+name = "deepseek-gateway"
+model_id = "deepseek-chat"
+provider = "deepseek"
+endpoint = "https://my-gateway.example.com/deepseek/v1"
+temperature = 0.3               # override the preset default temperature
+api_key = "sk-..."              # optional inline key (else $DEEPSEEK_API_KEY)
+
+# --- A fully custom OpenAI-compatible endpoint (legacy alias still works). ---
+[[models]]
+name = "custom-openai"
+model_id = "my-model"
 provider = "openai_compatible"
-endpoint = "https://your-gateway.example.com/v1"
-api_key = "sk-your-gateway-key"
-temperature = 0.2
-max_tokens = 8192
-
-# 直接使用 OpenAI 官方（省略 endpoint 即默认 https://api.openai.com/v1）
-# [[models]]
-# name = "gpt4o"
-# model_id = "gpt-4o"
-# provider = "openai_compatible"
-# temperature = 0.2
-# max_tokens = 8192
-
-# 新增一个模型：只需在此追加一个 [[models]] 块即可。
+endpoint = "https://custom.example.com/v1"
+temperature = 0.5
+max_tokens = 16384

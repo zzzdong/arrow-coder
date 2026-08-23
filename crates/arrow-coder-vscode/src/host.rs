@@ -17,12 +17,20 @@ use arrow_coder_core::agent::{AgentLoop, AgentLoopConfig, AgentSession};
 use arrow_coder_core::agents::AgentManager;
 use arrow_coder_core::core::config::{ProviderConfig, VibeConfig};
 use arrow_coder_core::core::error::Result as CoreResult;
+use arrow_coder_core::core::{ConfigRepository, LocalConfigRepository};
+use arrow_coder_core::session::header::HeaderPatch;
+use arrow_coder_core::session::store::SessionStore;
 use arrow_coder_core::core::BaseEvent;
 
 use crate::jsonrpc::FileChangeEntry;
+use crate::jsonrpc::{
+    SearchHitsPayload, SearchParam, SessionDetailPayload, SessionIdParam, SessionListPayload,
+    StatusPayload, TurnParam, TurnViewPayload,
+};
 use arrow_coder_core::llm::BackendLike;
 use arrow_coder_core::session::{
-    SessionLoggerConfig, SessionManager,
+    AbortSignal, AgentCancelCause, LocalSessionQuery, LocalSessionRepository, SessionFilter,
+    SessionId, SessionLoggerConfig, SessionManager, SessionQuery, SessionRepository,
 };
 use arrow_coder_core::skills::SkillManager;
 use arrow_coder_core::tools::PermissionChecker;
@@ -42,14 +50,40 @@ use crate::jsonrpc::{
 };
 use crate::workspace::WorkspaceIndex;
 
+/// Outcome of handling one request.
+///
+/// Every request that carries an `id` gets a real JSON-RPC response — the
+/// `result` (or an `error`) — so the caller can `await` it (h2-style: the
+/// request holds a handle to its response). Streaming output and state pushes
+/// travel as `events` (notifications) alongside the response.
+///
+/// For pure fire-and-forget / streaming commands `result` is `null`
+/// ("accepted"); for true request/response commands (e.g. `models/builtin`)
+/// it carries the actual data.
+pub enum HandleOutcome {
+    Answer { result: serde_json::Value, events: Vec<Event> },
+    Error { message: String, events: Vec<Event> },
+}
+
+impl HandleOutcome {
+    /// Wrap a legacy `Vec<Event>` (response `result` defaults to `null`).
+    fn events(events: Vec<Event>) -> Self {
+        HandleOutcome::Answer {
+            result: serde_json::Value::Null,
+            events,
+        }
+    }
+}
+
 /// A running host wrapping one agent session.
 pub struct Host {
     session: Arc<Mutex<AgentSession>>,
     /// Set true once `initialize` succeeded; subsequent requests before init are
     /// rejected with an `error` event.
     initialized: bool,
-    /// Signalled when an `abort` request arrives mid-turn.
-    abort_tx: Option<tokio::sync::watch::Sender<bool>>,
+    /// Signalled when an `abort` request arrives mid-turn. Carries the cancel
+    /// cause (`AbortSignal`) so the `TurnEnd` reason is accurate.
+    abort_tx: Option<tokio::sync::watch::Sender<AbortSignal>>,
     /// Set while a turn task is running; used to reject re-entrant prompts and
     /// to know whether `session/cancel` / `session/inject` target a live turn.
     running: Arc<AtomicBool>,
@@ -57,13 +91,9 @@ pub struct Host {
     /// in a `LineWriter`, so every `writeln!` + `flush` reaches the extension
     /// immediately — crucial when stdout is a pipe (no tty buffering surprises).
     out: Arc<AsyncMutex<Stdout>>,
-    /// Resolved config (captured at `session/create` time).
-    cfg: Option<VibeConfig>,
-    /// Absolute path of the main config file, if known — used by `config/update`
-    /// to persist changes.
-    config_path: Option<PathBuf>,
-    /// Absolute path of the standalone models file, if configured.
-    models_path: Option<PathBuf>,
+    /// 统一配置接缝（R2）。取代原来的 `cfg` / `config_path` / `models_path`
+    /// 三字段：模型解析、列表、写入、持久化全部经此，消费者不再直写后端。
+    repo: Option<Arc<LocalConfigRepository>>,
     /// Pending model alias to switch to; applied on the next `session/prompt`.
     pending_model: Option<String>,
     /// Pending reasoning-effort override; applied on the next `session/prompt`.
@@ -73,6 +103,11 @@ pub struct Host {
     /// Session persistence config, captured at `initialize`/`build_session` time.
     /// Used to reach the on-disk store for true deletion (not just registry prune).
     session_config: Option<SessionLoggerConfig>,
+    /// 统一会话资源接缝（R1）。取代每次 handler 临时 `LocalSessionRepository::new`，
+    /// 标题真相、列表、删除都经此——`WorkspaceIndex` 不再持有 title 副本（R4 收口）。
+    session_repo: Option<LocalSessionRepository>,
+    /// 会话衍生查询接缝（R3）：`session/turn` / `session/search` 经此投影。
+    query: Option<LocalSessionQuery>,
     /// The cwd this host is currently attached to (the active workspace root).
     active_cwd: Option<String>,
     /// The id of the currently open session (if any).
@@ -102,15 +137,15 @@ impl Host {
             initialized: false,
             abort_tx: None,
             out: Arc::new(AsyncMutex::new(tokio::io::stdout())),
-            cfg: None,
-            config_path: None,
-            models_path: None,
+            repo: None,
             pending_model: None,
             pending_effort: None,
             workspaces: Arc::new(Mutex::new(WorkspaceIndex::open(&sessions_dir))),
             active_cwd: None,
             active_session_id: None,
             session_config: None,
+            session_repo: None,
+            query: None,
             running: Arc::new(AtomicBool::new(false)),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_questions: Arc::new(Mutex::new(HashMap::new())),
@@ -165,97 +200,183 @@ impl Host {
         }
     }
 
-    /// Handle a single inbound request. Returns the list of events to emit
-    /// (already serialized as JSON lines by the caller). Most requests stream
-    /// events; `getMessages` and `undo` return a small fixed set.
-    pub async fn handle(&mut self, req: Request) -> Vec<Event> {
+    /// Write a single JSON-RPC **response** line whose `result` carries an
+    /// arbitrary JSON value (matched to the request by `id`).
+    ///
+    /// This is the host-side counterpart to the webview's `pending` map: every
+    /// request that carries an `id` now gets a real response — either a success
+    /// `result` or an `error` — so the caller can `await` it instead of relying
+    /// on a timeout + a side-channel notification. Streaming commands (e.g.
+    /// `session/prompt`) answer with `Ok(Value::Null)` ("accepted") while their
+    /// events continue to arrive as notifications.
+    pub async fn emit_response_value(
+        &self,
+        id: &serde_json::Value,
+        result: Result<serde_json::Value, String>,
+    ) {
+        let body = match result {
+            Ok(v) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": v }),
+            Err(error) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32603, "message": error },
+            }),
+        };
+        let mut out = self.out.lock().await;
+        let mut line = serde_json::to_string(&body).unwrap_or_else(|_| {
+            r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"response serialize failed"}}"#.to_string()
+        });
+        line.push('\n');
+        if let Err(e) = async {
+            out.write_all(line.as_bytes()).await?;
+            out.flush().await
+        }
+        .await
+        {
+            tracing::warn!("failed to write response to stdout: {}", e);
+        }
+    }
+
+    /// Handle a single inbound request. Returns the response outcome (a `result`
+    /// and/or `error`) plus any events to emit as notifications.
+    pub async fn handle(&mut self, req: Request) -> HandleOutcome {
         tracing::debug!("handle request: method={}", req.method);
         match req.method.as_str() {
-            "session/create" => self.handle_initialize(req.params).await,
+            "session/create" => HandleOutcome::events(self.handle_initialize(req.params).await),
             "session/prompt" => {
                 if !self.initialized {
-                    return vec![Event::Error {
+                    return HandleOutcome::events(vec![Event::Error {
                         error: "not initialized".to_string(),
-                    }];
+                    }]);
                 }
-                self.handle_chat(req.params).await
+                HandleOutcome::events(self.handle_chat(req.params).await)
             }
             "session/undo" => {
                 if !self.initialized {
-                    return vec![Event::Error {
+                    return HandleOutcome::events(vec![Event::Error {
                         error: "not initialized".to_string(),
-                    }];
+                    }]);
                 }
-                self.handle_undo()
+                HandleOutcome::events(self.handle_undo())
             }
             "session/restoreFile" => {
                 if !self.initialized {
-                    return vec![Event::Error {
+                    return HandleOutcome::events(vec![Event::Error {
                         error: "not initialized".to_string(),
-                    }];
+                    }]);
                 }
                 let params: crate::jsonrpc::RestoreFileParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
                     Err(e) => {
-                        return vec![Event::Error {
+                        return HandleOutcome::events(vec![Event::Error {
                             error: format!("invalid session/restoreFile params: {}", e),
-                        }]
+                        }]);
                     }
                 };
-                self.handle_restore_file(&params.path)
+                HandleOutcome::events(self.handle_restore_file(&params.path))
             }
             "todo/update" => {
                 if !self.initialized {
-                    return vec![Event::Error {
+                    return HandleOutcome::events(vec![Event::Error {
                         error: "not initialized".to_string(),
-                    }];
+                    }]);
                 }
                 let params: crate::jsonrpc::TodoUpdateParams = match serde_json::from_value(req.params) {
                     Ok(p) => p,
                     Err(e) => {
-                        return vec![Event::Error {
+                        return HandleOutcome::events(vec![Event::Error {
                             error: format!("invalid todo/update params: {}", e),
-                        }]
+                        }]);
                     }
                 };
-                self.handle_todo_update(&params.id, &params.status)
+                HandleOutcome::events(self.handle_todo_update(&params.id, &params.status))
             }
             "session/compact" => {
                 if !self.initialized {
-                    return vec![Event::Error {
+                    return HandleOutcome::events(vec![Event::Error {
                         error: "not initialized".to_string(),
-                    }];
+                    }]);
                 }
-                self.handle_compact().await
+                HandleOutcome::events(self.handle_compact().await)
             }
             "session/getMessages" => {
                 if !self.initialized {
-                    return vec![Event::Error {
+                    return HandleOutcome::events(vec![Event::Error {
                         error: "not initialized".to_string(),
-                    }];
+                    }]);
                 }
-                self.handle_get_messages()
+                HandleOutcome::events(self.handle_get_messages())
             }
             "session/cancel" => {
                 if let Some(tx) = &self.abort_tx {
-                    let _ = tx.send(true);
+                    // First cause wins (mirrors deepseek-harness: a second
+                    // `abort` is ignored once cancellation is already
+                    // requested, so an in-flight hook/parent cancel isn't
+                    // clobbered by a later user click).
+                    if !tx.borrow().requested {
+                        // User-initiated stop (UI stop button / Ctrl-C).
+                        let _ = tx.send(AbortSignal::trigger(AgentCancelCause::User));
+                    }
                 }
-                vec![]
+                HandleOutcome::events(vec![])
             }
-            "session/inject" => self.handle_inject(req.params).await,
-            "session/reconfigure" => self.handle_reconfigure(req.params).await,
-            "config/update" => self.handle_config_update(req.params).await,
-            "workspace/list" => vec![self.emit_workspace_state()],
-            "workspace/switch" => self.handle_switch_workspace(req.params).await,
-            "workspace/openSession" => self.handle_open_session(req.params).await,
-            "session/rename" => self.handle_rename_session(req.params).await,
-            "session/delete" => self.handle_delete_session(req.params).await,
-            "session/new" => self.handle_new_session().await,
-            "session/approve" => self.handle_approve(req.params).await,
-            "session/user_answer" => self.handle_user_answer(req.params).await,
-            other => vec![Event::Error {
+            "session/inject" => HandleOutcome::events(self.handle_inject(req.params).await),
+            "session/reconfigure" => HandleOutcome::events(self.handle_reconfigure(req.params).await),
+            "config/update" => HandleOutcome::events(self.handle_config_update(req.params).await),
+            "workspace/list" => HandleOutcome::events(vec![self.emit_workspace_state()]),
+            "workspace/switch" => HandleOutcome::events(self.handle_switch_workspace(req.params).await),
+            "workspace/openSession" => HandleOutcome::events(self.handle_open_session(req.params).await),
+            "session/rename" => HandleOutcome::events(self.handle_rename_session(req.params).await),
+            "session/delete" => HandleOutcome::events(self.handle_delete_session(req.params).await),
+            "session/new" => HandleOutcome::events(self.handle_new_session().await),
+            // The webview announces it has finished mounting. Reply with a
+            // `host_status` notification so the UI can auto-open the session the
+            // host actually resumed at init (instead of guessing by list order).
+            "host/ready" => HandleOutcome::events(vec![Event::Status(StatusPayload {
+                ready: true,
+                active_session: self.active_session_id.clone(),
+                error: None,
+            })]),
+            // `models/builtin` is a true request/response command: the catalog
+            // travels in the response `result` (not as a notification), so the
+            // webview can `await` it directly instead of listening for a
+            // `models/builtin` notification.
+            "models/builtin" => {
+                use arrow_coder_core::core::config::builtin_model_catalog;
+                let providers = builtin_model_catalog()
+                    .into_iter()
+                    .map(|p| crate::jsonrpc::BuiltinProviderPayload {
+                        provider: p.provider,
+                        key_env: p.key_env,
+                        models: p
+                            .models
+                            .into_iter()
+                            .map(|m| crate::jsonrpc::BuiltinModelPayload {
+                                model_id: m.model_id,
+                                label: m.label,
+                                thinking: m.thinking,
+                                reasoning_effort: m.reasoning_effort,
+                            })
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>();
+                HandleOutcome::Answer {
+                    result: serde_json::to_value(crate::jsonrpc::BuiltinCatalogPayload { providers })
+                        .unwrap_or(serde_json::Value::Null),
+                    events: vec![],
+                }
+            }
+            // ---- R4 资源协议薄桥（映射 R1/R2/R3 接缝）----
+            "session/list" => HandleOutcome::events(self.handle_session_list()),
+            "session/get" => HandleOutcome::events(self.handle_session_get(req.params)),
+            "session/turn" => HandleOutcome::events(self.handle_session_turn(req.params)),
+            "session/search" => HandleOutcome::events(self.handle_session_search(req.params)),
+            "config/models" => HandleOutcome::events(vec![self.emit_config()]),
+            "session/approve" => HandleOutcome::events(self.handle_approve(req.params).await),
+            "session/user_answer" => HandleOutcome::events(self.handle_user_answer(req.params).await),
+            other => HandleOutcome::events(vec![Event::Error {
                 error: format!("unknown method: {}", other),
-            }],
+            }]),
         }
     }
 
@@ -340,10 +461,9 @@ impl Host {
         // Seed the session's display title from its first prompt (mirrors
         // deepseek-harness, which titles conversations after the opening
         // message). Only set it once so later prompts don't clobber it.
-        if let (Some(cwd), Some(id), Ok(mut idx)) = (
-            self.active_cwd.clone(),
+        if let (Some(id), Some(repo)) = (
             self.active_session_id.clone(),
-            self.workspaces.try_lock(),
+            self.session_repo.as_ref(),
         ) {
             let title = content
                 .lines()
@@ -353,8 +473,20 @@ impl Host {
                 .chars()
                 .take(60)
                 .collect::<String>();
+            // 首次用户消息时 seed 标题到 header（真相源），仅当 header 尚空。
+            // 不再写 WorkspaceIndex 副本（R4 收口）。
             if !title.is_empty() {
-                idx.ensure_session_title(&cwd, &id, &title);
+                if let Ok(Some(header)) = repo.get_header(&SessionId::from(id.clone())) {
+                    if header.title.is_none() {
+                        let _ = repo.update_meta(
+                            &SessionId::from(id),
+                            &HeaderPatch {
+                                title: Some(title),
+                                cwd: None,
+                            },
+                        );
+                    }
+                }
             }
         }
 
@@ -367,11 +499,11 @@ impl Host {
         // An abort channel scoped to this turn. Wired into the AgentLoop so the
         // running turn observes the external stop request at the next iteration
         // (mirrors deepseek-harness `finish_reason == "stop"`).
-        let (abort_tx, abort_rx) = tokio::sync::watch::channel(false);
+        let (abort_tx, abort_rx) = tokio::sync::watch::channel(AbortSignal::default());
         self.abort_tx = Some(abort_tx);
 
         // Don't start if an abort was already requested before wiring.
-        if *abort_rx.borrow() {
+        if abort_rx.borrow().requested {
             return vec![Event::Error {
                 error: "aborted before start".to_string(),
             }];
@@ -381,7 +513,7 @@ impl Host {
         let session = self.session.clone();
         let out = self.out.clone();
         let running = self.running.clone();
-        let cfg = self.cfg.clone();
+        let repo = self.repo.clone();
         let pending_model = self.pending_model.take();
         let pending_effort = self.pending_effort.take();
         let content = content.clone();
@@ -449,8 +581,8 @@ impl Host {
             {
                 let mut s = session.lock().await;
                 if pending_model.is_some() || pending_effort.is_some() {
-                    if let Some(cfg) = cfg.as_ref() {
-                        Host::apply_pending_config(&mut s, cfg, pending_model, pending_effort);
+                    if let Some(repo) = repo.as_ref() {
+                        Host::apply_pending_config(&mut s, repo.as_ref(), pending_model, pending_effort);
                     }
                 }
                 // Wire the abort signal into the loop so a running turn observes it.
@@ -567,11 +699,12 @@ impl Host {
         };
 
         if let Some(ref alias) = params.model {
-            let cfg = match self.cfg.as_ref() {
-                Some(c) => c,
+            let repo = match self.repo.as_ref() {
+                Some(r) => r,
                 None => return vec![Event::Error { error: "config not loaded".to_string() }],
             };
-            if !cfg.models.iter().any(|m| &m.name == alias) {
+            // 经 repo 校验 alias（统一解析入口，不再重复遍历模型列表）。
+            if repo.resolve_model(alias).is_err() {
                 return vec![Event::Error {
                     error: format!("unknown model alias: {}", alias),
                 }];
@@ -600,58 +733,33 @@ impl Host {
         };
         let full = params.full;
 
-        // A config file must be known to write back to.
-        let config_path = match &self.config_path {
-            Some(p) => p.clone(),
+        let repo = match self.repo.as_ref() {
+            Some(r) => r,
             None => {
                 return vec![Event::Error {
-                    error: "no config file path available; cannot persist changes".to_string(),
+                    error: "no config loaded; cannot persist changes".to_string(),
                 }]
             }
         };
 
-        // Rebuild a VibeConfig from the edited view.
-        let mut cfg = self.cfg.clone().unwrap_or_default();
-        cfg.models = full.models;
-        cfg.active_model = full.active_model.or(cfg.active_model);
-
-        // Persist: models to the standalone models file (if configured), the
-        // rest to the main config file.
-        let models_path = self.models_path.clone();
-        if let Err(e) = cfg.save_split(&config_path, models_path.as_ref()) {
+        // 写模型注册表（Model 域）：直接经 repo 接缝持久化 + 广播变更，
+        // 不再手动 save_split + reload。
+        if let Err(e) = repo.set_models(full.models) {
             return vec![Event::Error {
-                error: format!("failed to save config: {}", e),
+                error: format!("failed to save models: {}", e),
+            }];
+        }
+        // 写激活模型（Agent 域）。
+        if let Err(e) = repo.set_active_model(full.active_model.as_deref()) {
+            return vec![Event::Error {
+                error: format!("failed to save active model: {}", e),
             }];
         }
 
-        // Reload so inline + standalone models merge consistently, then keep
-        // the resolved view in memory and refresh the UI.
-        let resolved = match VibeConfig::load(&config_path) {
-            Ok(c) => c,
-            Err(_) => cfg,
-        };
-        self.cfg = Some(resolved);
-        self.models_path = self
-            .cfg
-            .as_ref()
-            .and_then(|c| c.models_file.clone())
-            .map(|f| {
-                let p = std::path::Path::new(&f);
-                if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    config_path
-                        .parent()
-                        .map(|d| d.join(p))
-                        .unwrap_or_else(|| config_path.join(p))
-                }
-            })
-            .or(models_path);
-
         tracing::info!(
-            config = %config_path.display(),
-            models = ?self.models_path.as_ref().map(|p| p.display().to_string()),
-            "config/update: persisted configuration"
+            config = %repo.config_path_display(),
+            models = ?repo.models_path_display(),
+            "config/update: persisted configuration (via ConfigRepository)"
         );
 
         vec![self.emit_config()]
@@ -659,16 +767,18 @@ impl Host {
 
     /// Apply any pending model/effort override to the live session's agent
     /// loop. Called immediately before a turn's `send`, so the change lands on
-    /// exactly the next request without rebuilding the session.
+    /// exactly the next request without rebuilding the session.模型解析经
+    /// `ConfigRepository::resolve_model`（消除原先 `cfg.models.iter().find`
+    /// 式的重复加载逻辑——那是双份态的病根）。
     fn apply_pending_config(
         session: &mut AgentSession,
-        cfg: &VibeConfig,
+        repo: &dyn ConfigRepository,
         pending_model: Option<String>,
         pending_effort: Option<String>,
     ) {
         // Resolve the new model config (or keep the current one).
         let new_model = if let Some(ref alias) = pending_model {
-            cfg.models.iter().find(|m| &m.name == alias).cloned()
+            repo.resolve_model(alias).ok()
         } else {
             None
         };
@@ -689,12 +799,22 @@ impl Host {
 
     /// Build the `config` event describing the available models and the
     /// currently-active selection (accounting for any pending override).
+    /// 全部经 `ConfigRepository` 投影——消除原先直接读 `cfg.models` 的散落。
     fn emit_config(&self) -> Event {
-        let cfg = self.cfg.as_ref().expect("emit_config called before init");
+        let repo = self
+            .repo
+            .as_ref()
+            .expect("emit_config called before init");
+        let cfg_snapshot = repo.snapshot();
+
         let active_alias = self
             .pending_model
             .clone()
-            .or_else(|| Some(cfg.get_active_model().map(|m| m.name.clone()).unwrap_or_default()))
+            .or_else(|| {
+                repo.current_agent_config()
+                    .ok()
+                    .and_then(|a| a.active_model)
+            })
             .unwrap_or_default();
 
         // Resolve the model that will actually be used next (pending override
@@ -702,18 +822,25 @@ impl Host {
         let effective_model = self
             .pending_model
             .as_ref()
-            .and_then(|alias| cfg.models.iter().find(|m| &m.name == alias))
-            .or_else(|| cfg.get_active_model());
+            .and_then(|alias| repo.resolve_model(alias).ok())
+            .or_else(|| {
+                repo.current_agent_config()
+                    .ok()
+                    .and_then(|a| a.active_model)
+                    .and_then(|alias| repo.resolve_model(&alias).ok())
+            });
 
         let active_effort = self
             .pending_effort
             .clone()
             .or_else(|| effective_model.and_then(|m| m.reasoning_effort.clone()));
 
-        let models = cfg
-            .models
-            .iter()
-            .map(|m| (m.name.clone(), m.model_id.clone()))
+        // 模型列表经 repo.list_models()（轻量摘要，不含密钥）。
+        let models = repo
+            .list_models()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| (m.name, m.model_id))
             .collect();
 
         Event::Config(ConfigPayload {
@@ -728,43 +855,74 @@ impl Host {
                 })
                 .collect(),
             full: Some(ConfigViewPayload {
-                models: cfg.models.clone(),
-                active_model: cfg.active_model.clone(),
+                models: cfg_snapshot.models.clone(),
+                active_model: cfg_snapshot.active_model.clone(),
             }),
-            config_path: self.config_path.as_ref().map(|p| p.display().to_string()),
-            models_file: self.models_path.as_ref().map(|p| p.display().to_string()),
+            config_path: Some(repo.config_path_display()),
+            models_file: repo.models_path_display(),
         })
     }
 
     /// Build a `workspace_state` event snapshot from the in-memory registry.
+    ///
+    /// R4 收口：session 的 title / cwd / created_at **从 `SessionRepository::list`
+    /// 派生**（header.json 真相），`WorkspaceIndex` 只提供 workspace 根路径与
+    /// 激活顺序（id 顺序），不再持有 title 副本。
     fn emit_workspace_state(&self) -> Event {
         let mut payload = WorkspaceStatePayload {
             workspaces: Vec::new(),
             active_path: self.active_cwd.clone(),
             active_session: self.active_session_id.clone(),
         };
+        // 标题真相源：repo 的 header（若尚未初始化，则回退到 WS 旧副本）。
+        let repo = self.session_repo.as_ref();
         if let Ok(idx) = self.workspaces.try_lock() {
             payload.workspaces = idx
                 .list()
                 .into_iter()
-                .map(|ws| crate::jsonrpc::WorkspacePayload {
-                    path: ws.path,
-                    title: ws.title,
-                    created_at: Some(ws.created_at),
-                    last_seen: Some(ws.last_seen),
-                    sessions: ws
+                .map(|ws| {
+                    // 经 repo 取该 cwd 下的会话详情（title/cwd/created_at），
+                    // 以 WS 的 id 顺序作为激活顺序（UI 状态）。
+                    let details: std::collections::HashMap<
+                        String,
+                        arrow_coder_core::session::SessionSummary,
+                    > = match repo {
+                        Some(r) => r
+                            .list(&SessionFilter {
+                                cwd: Some(std::path::PathBuf::from(ws.path.clone())),
+                                query: None,
+                                limit: None,
+                                origin: None,
+                            })
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|e| (e.id.to_string(), e))
+                            .collect(),
+                        None => std::collections::HashMap::new(),
+                    };
+                    let sessions = ws
                         .sessions
-                        .into_iter()
-                        .map(|s| crate::jsonrpc::WorkspaceSessionPayload {
-                            id: s.id.clone(),
-                            title: if s.title.is_empty() {
-                                format!("(untitled {})", &s.id[..s.id.len().min(8)])
-                            } else {
-                                s.title
-                            },
-                            created_at: s.created_at,
+                        .iter()
+                        .filter_map(|s| {
+                            let entry = details.get(&s.id)?;
+                            let title = entry
+                                .title
+                                .clone()
+                                .unwrap_or_else(|| format!("(untitled {})", &s.id[..s.id.len().min(8)]));
+                            Some(crate::jsonrpc::WorkspaceSessionPayload {
+                                id: s.id.clone(),
+                                title,
+                                created_at: Some(entry.created_at),
+                            })
                         })
-                        .collect(),
+                        .collect();
+                    crate::jsonrpc::WorkspacePayload {
+                        path: ws.path,
+                        title: ws.title,
+                        created_at: Some(ws.created_at),
+                        last_seen: Some(ws.last_seen),
+                        sessions,
+                    }
                 })
                 .collect();
         }
@@ -836,39 +994,36 @@ impl Host {
         }
     }
 
-    /// Handle `session/rename`: update the display title in the registry.
+    /// Handle `session/rename`: update the display title in the header (R1 资源真相)
+    /// via `SessionRepository::update_meta`. `WorkspaceIndex` 不再持有 title 副本
+    /// （R4 收口），rename 只需写 repo，UI 在 `emit_workspace_state` 时从 repo 派生。
     async fn handle_rename_session(&mut self, params: serde_json::Value) -> Vec<Event> {
         let params: RenameSessionParams = match serde_json::from_value(params) {
             Ok(p) => p,
             Err(e) => return vec![Event::Error { error: format!("bad rename params: {}", e) }],
         };
-        let (cwd, id) = if let Some(id) = &params.session_id {
-            // Rename an arbitrary session: resolve its owning workspace from the
-            // registry so we don't depend on it being the active one.
-            if let Ok(idx) = self.workspaces.try_lock() {
-                match idx.find_session_cwd(id) {
-                    Some(cwd) => (cwd, id.clone()),
-                    None => {
-                        return vec![Event::Error {
-                            error: format!("session not found: {}", id),
-                        }]
-                    }
+        let id = match params.session_id.clone() {
+            Some(id) => id,
+            None => match self.active_session_id.clone() {
+                Some(id) => id,
+                None => {
+                    return vec![Event::Error {
+                        error: "no active session and no session_id given".to_string(),
+                    }]
                 }
-            } else {
-                return vec![Event::Error {
-                    error: "workspace index locked".to_string(),
-                }];
-            }
-        } else {
-            match (self.active_cwd.clone(), self.active_session_id.clone()) {
-                (Some(cwd), Some(id)) => (cwd, id),
-                _ => return vec![Event::Error {
-                    error: "no active session and no session_id given".to_string(),
-                }],
-            }
+            },
         };
-        if let Ok(mut idx) = self.workspaces.try_lock() {
-            idx.rename_session(&cwd, &id, &params.title);
+        // 标题真相只写 repo（header.json），不再双写 WorkspaceIndex。
+        if let Some(repo) = self.session_repo.as_ref() {
+            if let Err(e) = repo.update_meta(
+                &SessionId::from(id.clone()),
+                &HeaderPatch {
+                    title: Some(params.title.clone()),
+                    cwd: None,
+                },
+            ) {
+                tracing::warn!("session/rename: failed to update header: {}", e);
+            }
         }
         vec![self.emit_workspace_state()]
     }
@@ -887,19 +1042,22 @@ impl Host {
                 idx.remove_session(&cwd, &params.session_id);
             }
         }
-        // Truly delete the on-disk session directory via the saved-sessions
-        // manager (which locates it by scanning `save_dir`). The registry prune
-        // alone would leave the files orphaned and re-discoverable by
+        // Truly delete the on-disk session directory via the session repository
+        // (which locates it by scanning `save_dir`). The registry prune alone
+        // would leave the files orphaned and re-discoverable by
         // `list_sessions`/`resume`, so this must run too.
-        if let Some(ref cfg) = self.session_config {
-            let saved = arrow_coder_core::session::SavedSessionsManager::new(cfg.clone());
-            if let Err(e) = saved.delete_session(&params.session_id) {
+        if let Some(repo) = self.session_repo.as_ref() {
+            if let Err(e) = repo.delete(&SessionId::from(params.session_id.clone())) {
                 tracing::warn!("session/delete: failed to remove on-disk dir: {}", e);
             }
         }
         vec![self.emit_workspace_state()]
     }
 
+    /// Handle `models/builtin`: return the built-in provider/model catalog so
+    /// the settings UI can render provider + model dropdowns. Picking a model
+    /// becomes "select provider → pick model → enter key" — mirroring
+    /// deepseek-harness's provider model picker (only the key is required).
     /// Handle `session/new`: create a brand-new, empty session for the active
     /// workspace and switch to it. Unlike the old behavior (which restarted the
     /// whole host process), this stays in-process: it builds a fresh session,
@@ -932,6 +1090,89 @@ impl Host {
                     Event::Done,
                 ]
             }
+            Err(e) => vec![Event::Error { error: e.to_string() }],
+        }
+    }
+
+    // ===== R4 资源协议薄桥 =====
+    // 这些 handler 把 R1/`SessionRepository`、R2/`ConfigRepository`、R3/`SessionQuery`
+    // 的方法映射到 JSON-RPC。运行时（流式 LLM、工具执行）不进这里——那会牺牲
+    // 流式体验（harness `dsh-acp` 纪律）。
+
+    /// `session/list` → `SessionRepository::list`（轻量 header，无日志）。
+    fn handle_session_list(&self) -> Vec<Event> {
+        let repo = match self.session_repo.as_ref() {
+            Some(r) => r,
+            None => return vec![Event::Error { error: "session repo not initialized".to_string() }],
+        };
+        let sessions = repo
+            .list(&SessionFilter::default())
+            .unwrap_or_default();
+        vec![Event::SessionList(SessionListPayload { sessions })]
+    }
+
+    /// `session/get` → `get_header` + `SessionStore::load`（投影 UI 消息，非原始日志）。
+    fn handle_session_get(&self, params: serde_json::Value) -> Vec<Event> {
+        let params: SessionIdParam = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return vec![Event::Error { error: format!("bad params: {}", e) }],
+        };
+        let repo = match self.session_repo.as_ref() {
+            Some(r) => r,
+            None => return vec![Event::Error { error: "session repo not initialized".to_string() }],
+        };
+        let id = SessionId::from(params.session_id.clone());
+        let header = match repo.get_header(&id) {
+            Ok(Some(h)) => h,
+            Ok(None) => return vec![Event::Error { error: format!("session not found: {}", params.session_id) }],
+            Err(e) => return vec![Event::Error { error: e.to_string() }],
+        };
+        let messages = match repo.dir_of(&id) {
+            Some(dir) => match SessionStore::load_from_dir(&dir) {
+                Ok(store) => store.derive_ui_messages(),
+                Err(_) => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        vec![Event::SessionDetail(SessionDetailPayload { header, messages })]
+    }
+
+    /// `session/turn` → `SessionQuery::get_turn_window`（R3）。
+    fn handle_session_turn(&self, params: serde_json::Value) -> Vec<Event> {
+        let params: TurnParam = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return vec![Event::Error { error: format!("bad params: {}", e) }],
+        };
+        let q = match self.query.as_ref() {
+            Some(q) => q,
+            None => return vec![Event::Error { error: "query not initialized".to_string() }],
+        };
+        match q.get_turn_window(&SessionId::from(params.session_id.clone()), params.turn) {
+            Ok(tv) => vec![Event::TurnView(TurnViewPayload {
+                turn: tv.turn,
+                messages: tv.messages,
+                stats: tv.stats,
+            })],
+            Err(e) => vec![Event::Error { error: e.to_string() }],
+        }
+    }
+
+    /// `session/search` → `SessionQuery::search_events`（R3）。
+    fn handle_session_search(&self, params: serde_json::Value) -> Vec<Event> {
+        let params: SearchParam = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return vec![Event::Error { error: format!("bad params: {}", e) }],
+        };
+        let q = match self.query.as_ref() {
+            Some(q) => q,
+            None => return vec![Event::Error { error: "query not initialized".to_string() }],
+        };
+        match q.search_events(&SessionId::from(params.session_id.clone()), &params.query) {
+            Ok(hits) => vec![Event::SearchHits(SearchHitsPayload {
+                session_id: params.session_id,
+                query: params.query,
+                hits,
+            })],
             Err(e) => vec![Event::Error { error: e.to_string() }],
         }
     }
@@ -1072,21 +1313,28 @@ impl Host {
     async fn build_session(&mut self, params: &InitializeParams) -> CoreResult<()> {
         let config = VibeConfig::load_resolved().unwrap_or_else(|_| VibeConfig::with_defaults());
         tracing::debug!("build_session: config resolved, working_dir={:?}", params.cwd);
-        // Retain the resolved config so `reconfigure`/`emit_config` can later
-        // resolve model aliases and report the active selection.
-        self.cfg = Some(config.clone());
-        // Remember where this config lives so `config/update` can write back.
-        self.config_path = VibeConfig::user_config_path();
-        self.models_path = config.models_file.as_ref().and_then(|f| {
+
+        // 统一配置接缝（R2）：把解析后的配置连同路径收进 LocalConfigRepository，
+        // 后续模型解析/列表/写入/持久化全部经 repo，不再直写后端。
+        let config_path = VibeConfig::user_config_path()
+            .unwrap_or_else(|| PathBuf::from("config.toml"));
+        let models_path = config.models_file.as_ref().and_then(|f| {
             let p = std::path::Path::new(f);
             if p.is_absolute() {
                 Some(p.to_path_buf())
             } else {
-                // Resolve relative to the main config file's directory.
-                VibeConfig::user_config_path()
-                    .and_then(|base| base.parent().map(|d| d.join(p)))
+                config_path
+                    .parent()
+                    .map(|d| d.join(p))
+                    .or_else(|| Some(config_path.join(p)))
             }
         });
+        let repo = Arc::new(LocalConfigRepository::new(
+            config.clone(),
+            config_path,
+            models_path,
+        ));
+        self.repo = Some(repo.clone());
 
         let working_dir: PathBuf = params
             .cwd
@@ -1097,13 +1345,17 @@ impl Host {
 
         let auto_approve = params.auto_approve.unwrap_or(config.bypass_tool_permissions);
 
-        // Model + provider resolution.
-        let model_config = config
-            .get_active_model()
-            .cloned()
-            .ok_or_else(|| arrow_coder_core::core::ArrowError::Config(
-                "No active model configured. Set 'active_model' in your config file.".to_string(),
-            ))?;
+        // Model + provider resolution — 经 repo 取激活模型并解析（消除
+        // 原先 `cfg.models.iter().find` 式的重复加载逻辑）。
+        let active_alias = repo
+            .current_agent_config()?
+            .active_model
+            .ok_or_else(|| {
+                arrow_coder_core::core::ArrowError::Config(
+                    "No active model configured. Set 'active_model' in your config file.".to_string(),
+                )
+            })?;
+        let model_config = repo.resolve_model(&active_alias)?;
 
         // Resolve the runtime backend config: model -> endpoint -> provider
         // family. This supports multiple endpoints per protocol family (e.g.
@@ -1366,7 +1618,7 @@ impl Host {
         let mut agent_loop = AgentLoop::new(AgentLoopConfig {
             max_turns: Some(200),
             max_price: None,
-            max_session_tokens: model_config.max_tokens.map(|t| t as u64),
+            max_session_tokens: model_config.effective_max_tokens().map(|t| t as u64),
             auto_compact_threshold: model_config.auto_compact_threshold,
         })
         .with_backend(backend)
@@ -1413,6 +1665,12 @@ impl Host {
         // Stash the persistence config so `session/delete` can reach the on-disk
         // store and truly remove the directory (not just prune the registry).
         self.session_config = Some(session_config.clone());
+        // 统一会话资源/查询接缝（R1/R3）：单次构造，取代各 handler 临时
+        // `LocalSessionRepository::new`；标题真相、列表、删除、turn/搜索都经此，
+        // `WorkspaceIndex` 不再持有 title 副本（R4 收口）。
+        let session_repo = LocalSessionRepository::new(session_config);
+        self.session_repo = Some(session_repo.clone());
+        self.query = Some(LocalSessionQuery::new(std::sync::Arc::new(session_repo)));
 
         Ok(())
     }

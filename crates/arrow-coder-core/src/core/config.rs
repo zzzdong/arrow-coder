@@ -1,3 +1,5 @@
+pub mod repository;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,16 +10,250 @@ use crate::core::error::Result;
 /// schema and the transport/protocol layer share a single source of truth).
 pub use crate::mcp::protocol::McpServerConfig;
 
+/// A **built-in provider preset** — the model-level `provider` field references
+/// one of these by name to inherit sensible defaults for the backend kind, the
+/// API base URL, the reasoning field, the key env var, and sampling defaults.
+///
+/// This is what makes `models.toml` terse: writing `provider = "deepseek"`
+/// already pins the official endpoint, the `reasoning_content` field, the
+/// `DEEPSEEK_API_KEY` env var, and reasonable `temperature`/`max_tokens` — none
+/// of which must be repeated per model. Any of those can still be overridden by
+/// the model's own fields (`endpoint`, `temperature`, `max_tokens`, …).
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltinProvider {
+    /// Backend implementation consumed by `init_backend` (`deepseek`,
+    /// `deepseek-responses`, `openai`, `anthropic`).
+    pub kind: &'static str,
+    /// Default API base URL (a model may override via `endpoint`).
+    pub api_base: &'static str,
+    /// Response field carrying the model's reasoning trace, if any.
+    pub reasoning_field: Option<&'static str>,
+    /// Default API key environment variable.
+    pub api_key_env_var: &'static str,
+    /// Default sampling temperature.
+    pub temperature: f64,
+    /// Default max output tokens.
+    pub max_tokens: u32,
+    /// Default nucleus sampling `top_p`. `None` means "not preset by the
+    /// provider — the model decides" (most providers leave it unset). The
+    /// DeepSeek presets default to `0.95` to match DeepSeek's official
+    /// recommendation (temperature=1.0, top_p=0.95).
+    pub top_p: Option<f64>,
+}
+
+/// Look up a built-in provider preset by name.
+///
+/// Any unknown name (including the legacy `openai_compatible` alias) falls back
+/// to the `openai` preset — an OpenAI-compatible endpoint with a configurable
+/// URL — so old `provider = "openai_compatible"` configs keep working.
+pub fn builtin_provider(name: &str) -> BuiltinProvider {
+    match name {
+        "deepseek" => BuiltinProvider {
+            kind: "deepseek",
+            api_base: "https://api.deepseek.com",
+            reasoning_field: Some("reasoning_content"),
+            api_key_env_var: "DEEPSEEK_API_KEY",
+            temperature: 0.7,
+            max_tokens: 64000,
+            top_p: Some(0.95),
+        },
+        "deepseek-responses" => BuiltinProvider {
+            kind: "deepseek-responses",
+            api_base: "https://api.deepseek.com",
+            reasoning_field: Some("reasoning"),
+            api_key_env_var: "DEEPSEEK_API_KEY",
+            temperature: 0.7,
+            max_tokens: 64000,
+            top_p: Some(0.95),
+        },
+        "openai" | "openai_compatible" => BuiltinProvider {
+            kind: "openai",
+            api_base: "https://api.openai.com/v1",
+            reasoning_field: Some("reasoning"),
+            api_key_env_var: "OPENAI_API_KEY",
+            temperature: 0.7,
+            max_tokens: 8192,
+            top_p: None,
+        },
+        "anthropic" => BuiltinProvider {
+            kind: "anthropic",
+            api_base: "https://api.anthropic.com",
+            reasoning_field: None,
+            api_key_env_var: "ANTHROPIC_API_KEY",
+            temperature: 0.7,
+            max_tokens: 8192,
+            top_p: None,
+        },
+        "local" => BuiltinProvider {
+            kind: "openai",
+            api_base: "http://127.0.0.1:8080/v1",
+            reasoning_field: None,
+            api_key_env_var: "OPENAI_API_KEY",
+            temperature: 0.7,
+            max_tokens: 4096,
+            top_p: None,
+        },
+        // Unknown name -> OpenAI-compatible fallback (configurable URL).
+        _ => BuiltinProvider {
+            kind: "openai",
+            api_base: "https://api.openai.com/v1",
+            reasoning_field: Some("reasoning"),
+            api_key_env_var: "OPENAI_API_KEY",
+            temperature: 0.7,
+            max_tokens: 8192,
+            top_p: None,
+        },
+    }
+}
+
+/// A single built-in model entry within a provider's catalog.
+///
+/// Carries the API model id plus suggested UI defaults, so picking a model from
+/// a provider's dropdown is a one-click "pick + enter key" flow (mirrors
+/// deepseek-harness selecting a model from a provider's dropdown — only the key
+/// is needed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuiltinModel {
+    /// Model id sent to the API (e.g. `deepseek-chat`, `deepseek-v4-flash`).
+    pub model_id: String,
+    /// Human-readable label for the dropdown.
+    pub label: String,
+    /// Suggested `thinking` preset when this model is added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// Suggested `reasoning_effort` when this model is added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+/// A provider entry in the built-in catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuiltinProviderModels {
+    /// Provider preset name (references [`builtin_provider`]).
+    pub provider: String,
+    /// Environment variable the key is read from (e.g. `DEEPSEEK_API_KEY`).
+    pub key_env: String,
+    /// Models offered under this provider.
+    pub models: Vec<BuiltinModel>,
+}
+
+/// The full built-in model catalog: every shipped provider preset and the
+/// models it offers. The settings UI renders this as provider + model dropdowns
+/// so users can add a model by picking + entering a key — no id/endpoint typing.
+///
+/// DeepSeek entries include the V4 series (`deepseek-v4-flash`,
+/// `deepseek-v4-pro`, `deepseek-v4-flash-vision-exp`) plus the stable
+/// `deepseek-chat` / `deepseek-reasoner`.
+pub fn builtin_model_catalog() -> Vec<BuiltinProviderModels> {
+    vec![
+        BuiltinProviderModels {
+            provider: "deepseek".to_string(),
+            key_env: builtin_provider("deepseek").api_key_env_var.to_string(),
+            models: vec![
+                BuiltinModel {
+                    model_id: "deepseek-v4-flash".to_string(),
+                    label: "DeepSeek V4 Flash".to_string(),
+                    thinking: Some("high".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                },
+                BuiltinModel {
+                    model_id: "deepseek-v4-pro".to_string(),
+                    label: "DeepSeek V4 Pro".to_string(),
+                    thinking: Some("high".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                },
+                BuiltinModel {
+                    model_id: "deepseek-v4-flash-vision-exp".to_string(),
+                    label: "DeepSeek V4 Flash Vision (exp)".to_string(),
+                    thinking: Some("high".to_string()),
+                    reasoning_effort: Some("high".to_string()),
+                },
+                BuiltinModel {
+                    model_id: "deepseek-chat".to_string(),
+                    label: "DeepSeek Chat".to_string(),
+                    thinking: None,
+                    reasoning_effort: None,
+                },
+                BuiltinModel {
+                    model_id: "deepseek-reasoner".to_string(),
+                    label: "DeepSeek Reasoner".to_string(),
+                    thinking: Some("high".to_string()),
+                    reasoning_effort: Some("max".to_string()),
+                },
+            ],
+        },
+        BuiltinProviderModels {
+            provider: "openai".to_string(),
+            key_env: builtin_provider("openai").api_key_env_var.to_string(),
+            models: vec![
+                BuiltinModel {
+                    model_id: "gpt-4o".to_string(),
+                    label: "GPT-4o".to_string(),
+                    thinking: None,
+                    reasoning_effort: None,
+                },
+                BuiltinModel {
+                    model_id: "gpt-4o-mini".to_string(),
+                    label: "GPT-4o mini".to_string(),
+                    thinking: None,
+                    reasoning_effort: None,
+                },
+                BuiltinModel {
+                    model_id: "o3-mini".to_string(),
+                    label: "o3-mini".to_string(),
+                    thinking: None,
+                    reasoning_effort: Some("medium".to_string()),
+                },
+            ],
+        },
+        BuiltinProviderModels {
+            provider: "anthropic".to_string(),
+            key_env: builtin_provider("anthropic").api_key_env_var.to_string(),
+            models: vec![
+                BuiltinModel {
+                    model_id: "claude-opus-4".to_string(),
+                    label: "Claude Opus 4".to_string(),
+                    thinking: None,
+                    reasoning_effort: None,
+                },
+                BuiltinModel {
+                    model_id: "claude-sonnet-4".to_string(),
+                    label: "Claude Sonnet 4".to_string(),
+                    thinking: None,
+                    reasoning_effort: None,
+                },
+                BuiltinModel {
+                    model_id: "claude-haiku-4".to_string(),
+                    label: "Claude Haiku 4".to_string(),
+                    thinking: None,
+                    reasoning_effort: None,
+                },
+            ],
+        },
+        BuiltinProviderModels {
+            provider: "local".to_string(),
+            key_env: builtin_provider("local").api_key_env_var.to_string(),
+            models: vec![BuiltinModel {
+                model_id: "local-model".to_string(),
+                label: "Local Model (自定义)".to_string(),
+                thinking: None,
+                reasoning_effort: None,
+            }],
+        },
+    ]
+}
+
 /// Provider (runtime backend) configuration.
 ///
 /// This struct is **generated at runtime** by [`VibeConfig::resolve_provider`]
-/// from a [`ModelConfig`] — it is not a user-configurable table. A model's
-/// `provider` field is one of the two supported kinds:
+/// from a [`ModelConfig`] — it is not a user-configurable table.
 ///
-///   * `"deepseek"` — the DeepSeek Chat Completions backend, with `reasoning_content`.
-///   * `"openai_compatible"` — an OpenAI-compatible backend (configurable URL).
-///
-/// The resolved value is what the LLM backends consume.
+/// A model's `provider` field **references a built-in provider preset** (see
+/// [`builtin_provider`]) such as `deepseek`, `deepseek-responses`, `openai`,
+/// `anthropic`, or `local`. The preset supplies the backend `kind`, the default
+/// `api_base` URL, the reasoning field, and the key env var; the model may
+/// override any of those via its own fields (notably `endpoint`). The resolved
+/// value is what the LLM backends consume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     /// Provider kind (`"deepseek"` | `"openai_compatible"`).
@@ -60,40 +296,70 @@ impl ProviderConfig {
 
 /// Model configuration — a self-contained definition of one selectable model.
 ///
-/// Every model carries its own access details. Providers are **built in** —
-/// exactly two kinds:
+/// Every model **references a built-in provider preset** via [`ModelConfig::provider`]
+/// (see [`builtin_provider`]) and may override any preset default with its own
+/// fields. This keeps the common case terse — e.g. `provider = "deepseek"`
+/// already implies the official endpoint, reasoning field, key env var, and
+/// sampling defaults — while still letting `models.toml` **fully determine** the
+/// LLM access info (set `endpoint`, `temperature`, `max_tokens`, … to override).
 ///
-///   * `"deepseek"` — the request endpoint is **fixed** to the official
-///     DeepSeek API; only [`Self::model_id`] and [`Self::api_key`] apply.
-///   * `"openai_compatible"` — an OpenAI-compatible endpoint;
-///     [`Self::endpoint`] is the freely-configurable base URL, alongside
-///     model id and key.
+/// Built-in provider presets include `deepseek`, `deepseek-responses`, `openai`,
+/// `anthropic`, `local`, and the `openai_compatible` alias (an OpenAI-compatible
+/// endpoint with a configurable URL).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     /// Display identifier used in the model selector and `active_model`.
     pub name: String,
     /// Model id sent to the API (e.g. `deepseek-chat`, `deepseek-reasoner`).
     pub model_id: String,
-    /// Provider kind — `"deepseek"` or `"openai_compatible"`.
+    /// Provider preset name — references a built-in provider (e.g. `deepseek`,
+    /// `openai`, `anthropic`, `local`). The preset supplies the backend kind,
+    /// default endpoint, reasoning field, key env var, and sampling defaults;
+    /// any of those can be overridden below.
     pub provider: String,
-    /// API base URL, used only by the `openai_compatible` provider. Ignored
-    /// for `"deepseek"` (its endpoint is fixed to the official API). When
-    /// omitted for `openai_compatible`, the default
-    /// `https://api.openai.com/v1` is used.
+    /// API base URL. Overrides the referenced provider preset's default base
+    /// URL. Every provider honors this (a model can point `deepseek` at a
+    /// custom gateway, or `openai`/`local` at any OpenAI-compatible endpoint).
+    /// When omitted, the preset's built-in `api_base` is used.
     pub endpoint: Option<String>,
-    /// Optional API key. When omitted, `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`
-    /// (or `{PROVIDER}_API_KEY`) environment variable is used.
+    /// Optional API key. When omitted, the provider preset's key env var
+    /// (or `{PROVIDER}_API_KEY`) is used.
     pub api_key: Option<String>,
     /// Thinking mode toggle/preset.
     pub thinking: Option<String>,
     /// Reasoning effort (`off` | `high` | `max` for deepseek).
     pub reasoning_effort: Option<String>,
-    /// Sampling temperature.
+    /// Sampling temperature. Overrides the provider preset's default when set.
     pub temperature: Option<f64>,
-    /// Maximum output tokens.
+    /// Maximum output tokens. Overrides the provider preset's default when set.
     pub max_tokens: Option<u32>,
+    /// Nucleus sampling `top_p`. Overrides the provider preset's default when set.
+    pub top_p: Option<f64>,
     /// Auto-compact context threshold.
     pub auto_compact_threshold: Option<u64>,
+}
+
+impl ModelConfig {
+    /// Effective sampling temperature: the model's override, or the built-in
+    /// provider preset's default (so referencing a provider needs no repetition).
+    pub fn effective_temperature(&self) -> f64 {
+        self.temperature
+            .unwrap_or_else(|| builtin_provider(&self.provider).temperature)
+    }
+
+    /// Effective max output tokens: the model's override, or the built-in
+    /// provider preset's default.
+    pub fn effective_max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+            .or_else(|| Some(builtin_provider(&self.provider).max_tokens))
+    }
+
+    /// Effective nucleus sampling `top_p`: the model's override, or the
+    /// built-in provider preset's default when neither is set.
+    pub fn effective_top_p(&self) -> Option<f64> {
+        self.top_p
+            .or_else(|| builtin_provider(&self.provider).top_p)
+    }
 }
 
 /// A standalone model-definition file (referenced by `VibeConfig.models_file`).
@@ -237,58 +503,32 @@ impl VibeConfig {
 
     /// Resolve the runtime backend configuration for a model.
     ///
-    /// Providers are **built in**; there are exactly two, and they differ in
-    /// how the request endpoint is determined:
-    ///
-    ///   * `"deepseek"` — the endpoint is **fixed** to the official DeepSeek
-    ///     API (`https://api.deepseek.com`). `model.endpoint` is ignored; only
-    ///     the model id and API key are user-configurable.
-    ///   * `"openai_compatible"` — an **OpenAI-compatible** endpoint:
-    ///     `model.endpoint` is the freely-configurable base URL (falling back
-    ///     to the OpenAI default when omitted), alongside model id and API key.
+    /// The model `provider` field **references a built-in provider preset**
+    /// (see [`builtin_provider`]). The preset contributes the backend `kind`,
+    /// the default API base URL, the reasoning field, and the key env var. The
+    /// model may override the base URL with its own `endpoint` (every provider
+    /// honors this — so `models.toml` can fully determine the LLM access info),
+    /// and may override the API key inline. Sampling defaults (`temperature`,
+    /// `max_tokens`) come from the preset unless the model overrides them via
+    /// [`ModelConfig::effective_temperature`] / [`ModelConfig::effective_max_tokens`].
     ///
     /// The returned [`ProviderConfig`] carries the backend kind, reasoning
     /// field, URL, and key — the shape the LLM backends consume.
     pub fn resolve_provider(&self, model: &ModelConfig) -> Result<ProviderConfig> {
-        // Backend kind, (fixed or default) URL, reasoning field, env key.
-        let (kind, endpoint, reasoning_field, default_key_env): (
-            &str,
-            String,
-            Option<&str>,
-            &str,
-        ) = match model.provider.as_str() {
-            // DeepSeek: endpoint is hard-coded to the official API.
-            "deepseek" => (
-                "deepseek-chat",
-                "https://api.deepseek.com".to_string(),
-                Some("reasoning_content"),
-                "DEEPSEEK_API_KEY",
-            ),
-            // OpenAI-compatible: URL comes from the model (or the default).
-            "openai_compatible" => (
-                "openai",
-                model
-                    .endpoint
-                    .clone()
-                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-                Some("reasoning_content"),
-                "OPENAI_API_KEY",
-            ),
-            other => {
-                return Err(crate::core::ArrowError::Config(format!(
-                    "Unsupported provider '{}' for model '{}'. Supported built-in providers: \
-                     'deepseek' | 'openai_compatible'.",
-                    other, model.name
-                )))
-            }
-        };
-
+        let preset = builtin_provider(&model.provider);
         Ok(ProviderConfig {
             name: model.provider.clone(),
-            kind: kind.to_string(),
-            reasoning_field_name: reasoning_field.map(String::from),
-            api_base: endpoint,
-            api_key_env_var: Some(default_key_env.to_string()),
+            kind: preset.kind.to_string(),
+            reasoning_field_name: preset.reasoning_field.map(String::from),
+            // Model `endpoint` overrides the preset's default base URL; this
+            // applies to *every* provider (DeepSeek can be repointed at a
+            // gateway, OpenAI/local at any compatible URL). When omitted the
+            // preset's built-in endpoint is used.
+            api_base: model
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| preset.api_base.to_string()),
+            api_key_env_var: Some(preset.api_key_env_var.to_string()),
             api_key: model.api_key.clone(),
         })
     }
@@ -528,9 +768,10 @@ impl VibeConfig {
 
     /// Create a default configuration with a couple of built-in models.
     ///
-    /// Each model is self-contained (provider + URL + key); the two supported
-    /// providers are `deepseek` and `openai`. Models sharing a provider may use
-    /// different model ids and keys — e.g. a flash and a pro DeepSeek model.
+    /// Each model **references a built-in provider preset** (e.g. `deepseek`,
+    /// `openai`, `local`) and overrides only what differs — the endpoint, key,
+    /// and sampling defaults all come from the preset. Models sharing a preset
+    /// may use different model ids (e.g. a flash and a pro DeepSeek model).
     pub fn with_defaults() -> Self {
         let mut config = Self::default();
 
@@ -546,6 +787,7 @@ impl VibeConfig {
                 temperature: Some(0.2),
                 max_tokens: Some(64000),
                 auto_compact_threshold: Some(64000),
+                top_p: None,
             },
             ModelConfig {
                 name: "deepseek-pro".to_string(),
@@ -558,6 +800,7 @@ impl VibeConfig {
                 temperature: Some(0.2),
                 max_tokens: Some(64000),
                 auto_compact_threshold: Some(64000),
+                top_p: None,
             },
             ModelConfig {
                 name: "gpt4o".to_string(),
@@ -570,6 +813,7 @@ impl VibeConfig {
                 temperature: Some(0.2),
                 max_tokens: Some(8192),
                 auto_compact_threshold: Some(16000),
+                top_p: None,
             },
             ModelConfig {
                 name: "local".to_string(),
@@ -582,6 +826,7 @@ impl VibeConfig {
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
                 auto_compact_threshold: Some(8000),
+                top_p: None,
             },
         ];
 
@@ -617,16 +862,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_provider_deepseek_ignores_custom_endpoint() {
+    fn resolve_provider_deepseek_honors_custom_endpoint() {
         let cfg = base_config();
         let mut model = cfg.models.iter().find(|m| m.name == "deepseek-pro").unwrap().clone();
-        // Even if the user sets an endpoint, DeepSeek's is fixed to the
-        // official API. Only the key is honored.
-        model.endpoint = Some("https://evil.example.com".to_string());
+        // A model may repoint any provider (incl. DeepSeek) at a custom gateway
+        // via `endpoint`; `models.toml` fully determines the access info.
+        model.endpoint = Some("https://gateway.example.com".to_string());
         model.api_key = Some("inline-key".to_string());
         let resolved = cfg.resolve_provider(&model).unwrap();
 
-        assert_eq!(resolved.api_base, "https://api.deepseek.com");
+        assert_eq!(resolved.api_base, "https://gateway.example.com");
         assert_eq!(resolved.get_api_key().as_deref(), Some("inline-key"));
         assert_eq!(resolved.kind(), "deepseek-chat");
     }
@@ -651,11 +896,29 @@ mod tests {
     }
 
     #[test]
-    fn resolve_provider_rejects_unknown_provider() {
+    fn resolve_provider_anthropic_preset() {
         let cfg = base_config();
         let mut model = cfg.models[0].clone();
+        // `anthropic` is a built-in provider preset; it resolves to the
+        // anthropic backend with the preset's default endpoint + key env var.
         model.provider = "anthropic".to_string();
-        assert!(cfg.resolve_provider(&model).is_err());
+        let resolved = cfg.resolve_provider(&model).unwrap();
+        assert_eq!(resolved.kind(), "anthropic");
+        assert_eq!(resolved.api_base, "https://api.anthropic.com");
+        assert_eq!(resolved.api_key_env_var.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(resolved.reasoning_field_name, None);
+    }
+
+    #[test]
+    fn resolve_provider_unknown_falls_back_to_openai() {
+        let cfg = base_config();
+        let mut model = cfg.models[0].clone();
+        // An unrecognized provider name falls back to the openai-compatible
+        // preset rather than erroring, so old/odd configs still resolve.
+        model.provider = "some-future-provider".to_string();
+        let resolved = cfg.resolve_provider(&model).unwrap();
+        assert_eq!(resolved.kind(), "openai");
+        assert_eq!(resolved.api_base, "https://api.openai.com/v1");
     }
 
     #[test]

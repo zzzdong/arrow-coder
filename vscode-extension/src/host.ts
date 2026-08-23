@@ -61,20 +61,20 @@ function resolveHostBinary(configured: string, extensionUri?: vscode.Uri): strin
 
   // --- Tier 2: bundled binary inside the extension install directory ---
   // When packaged (or after `vscode:prepublish`), the host binary ships inside
-  // the extension at `<ext>/bin/<platform>-<arch>/`, the layout used by
-  // platform-specific `vsce package --target` builds (e.g.
-  // `bin/win32-x64/arrow-coder-vscode.exe`). We also accept the legacy flat
-  // `<ext>/bin/` and `<ext>/bin/<platform>/` locations for dev convenience.
-  // We do NOT walk up to a parent cargo workspace — a bundled build is always
-  // self-contained under the extension root.
+  // the extension at `<ext>/bin/`, a single platform-agnostic directory where
+  // every platform build lands (no `<platform>-<arch>` subfolder). The legacy
+  // `bin/<platform>-<arch>/` layout is kept as a fallback for already-packaged
+  // .vsix files that predate this change. We do NOT walk up to a parent cargo
+  // workspace — a bundled build is always self-contained under the extension root.
   const extDir = extensionUri ? extensionUri.fsPath : __dirname;
   const platform = process.platform; // win32 | darwin | linux
   const arch = process.arch; // x64 | arm64 | ia32
   const targetDir = `${platform}-${arch}`;
   const extCandidates = [
-    path.join(extDir, 'bin', targetDir, name),
     path.join(extDir, 'bin', name),
-    path.join(extDir, 'bin', platform, name),
+    path.join(extDir, 'bin', `${name}.exe`),
+    path.join(extDir, 'bin', targetDir, name),
+    path.join(extDir, 'bin', targetDir, `${name}.exe`),
   ];
   for (const c of extCandidates) {
     if (fs.existsSync(c)) {

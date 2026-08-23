@@ -102,11 +102,13 @@ pub struct AgentLoop {
     skill_manager: Option<SkillManager>,
     /// File checkpointer for undoing file changes made by tools
     file_checkpointer: FileCheckpointer,
-    /// External abort signal. When the paired `watch::Sender` flips to `true`,
-    /// the running turn stops gracefully at the next loop iteration (mirroring
-    /// deepseek-harness `finish_reason == "stop"`). Checked at the top of each
-    /// turn iteration and, for the streaming variant, between token chunks.
-    abort_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    /// External abort signal. When the paired `watch::Sender` flips to
+    /// `requested`, the running turn stops gracefully at the next loop iteration
+    /// (mirroring deepseek-harness `finish_reason == "stop"`). The signal also
+    /// carries *why* (an `AgentCancelCause`), so the `TurnEnd` reason is
+    /// accurate instead of always `User`. Checked at the top of each turn
+    /// iteration and, for the streaming variant, between token chunks.
+    abort_rx: Option<tokio::sync::watch::Receiver<crate::session::AbortSignal>>,
     /// Runtime-injected messages queued by `inject_message`. Consumed at the
     /// top of each turn iteration so they are included in the next LLM call
     /// (mirroring deepseek-harness `messages.append({role, content})`).
@@ -331,9 +333,10 @@ impl AgentLoop {
 
     // --- Runtime turn control (stop / inject) -------------------------------
 
-    /// Wire an external abort signal. When the paired sender is set to `true`,
-    /// the running turn terminates gracefully at the next loop iteration.
-    pub fn set_abort_rx(&mut self, rx: tokio::sync::watch::Receiver<bool>) {
+    /// Wire an external abort signal. When the paired sender's `requested`
+    /// flips to `true`, the running turn terminates gracefully at the next loop
+    /// iteration, recording the `TurnEnd` reason with the carried `cause`.
+    pub fn set_abort_rx(&mut self, rx: tokio::sync::watch::Receiver<crate::session::AbortSignal>) {
         self.abort_rx = Some(rx);
     }
 
@@ -359,11 +362,21 @@ impl AgentLoop {
         self.inject_message(Role::System, text);
     }
 
-    /// Returns `true` if an external abort has been requested.
-    fn abort_requested(&mut self) -> bool {
+    /// Returns the cancel cause if an external abort has been requested, else
+    /// `None`. Reads the *current* signal value (not a change delta) so every
+    /// poll point — the turn-loop head and the streaming token loop — observes
+    /// the same requested state consistently.
+    fn abort_requested(&mut self) -> Option<crate::session::AgentCancelCause> {
         match self.abort_rx.as_mut() {
-            Some(rx) => rx.has_changed().unwrap_or(false) && *rx.borrow(),
-            None => false,
+            Some(rx) => {
+                let sig = rx.borrow();
+                if sig.requested {
+                    Some(sig.cause)
+                } else {
+                    None
+                }
+            }
+            None => None,
         }
     }
 
@@ -559,7 +572,7 @@ impl AgentLoop {
     /// Finalize a turn: capture per-turn usage (delta since the last turn),
     /// persist it as `SessionEvent::TurnStats` (so replay shows per-turn stats),
     /// update `AgentStats` turn fields, and emit a live usage event.
-    fn finalize_turn_stats(&mut self) {
+    fn finalize_turn_stats(&mut self, end_reason: crate::session::TurnEndReason) {
         let stats = self.stats.lock().unwrap().clone();
         let base = self.turn_base_stats.take().unwrap_or_default();
         let duration_ms = self
@@ -600,6 +613,15 @@ impl AgentLoop {
         // Persist so replay / resume reconstructs the per-turn stats message.
         let _ = self.session_store.append(crate::session::SessionEvent::TurnStats {
             stats: turn.clone(),
+            ts: now_ts(),
+        });
+
+        // Close the turn in the log (mirrors deepseek-harness `turn/end`).
+        // `end_reason` is `Completed` on the normal path; a Stop-hook abort
+        // passes `Aborted { cause: Hook }` so the turn ends with the right cause.
+        let _ = self.session_store.append(crate::session::SessionEvent::TurnEnd {
+            turn: self.current_turn,
+            reason: end_reason,
             ts: now_ts(),
         });
 
@@ -1311,6 +1333,13 @@ impl AgentLoop {
         self.current_turn += 1;
         self.stats.lock().unwrap().steps = self.current_turn;
 
+        // Open the turn in the log (mirrors deepseek-harness `turn/start`). The
+        // session only records this; the agent driver owns the active turn.
+        let _ = self.session_store.append(crate::session::SessionEvent::TurnStart {
+            turn: self.current_turn,
+            ts: now_ts(),
+        });
+
         let user_msg = LLMMessage::user(&user_text);
         self.push_message(user_msg.clone());
 
@@ -1328,6 +1357,8 @@ impl AgentLoop {
             MiddlewareAction::Stop => {
                 tracing::warn!(target: "agent_loop", "Middleware stopped the turn: {}",
                     result.reason.as_deref().unwrap_or("No reason provided"));
+                // Middleware stops the turn before any work begins: no `TurnEnd`
+                // is written (the turn effectively never started producing output).
                 return Err(result.reason.unwrap_or_else(|| "Middleware stopped the turn.".to_string()));
             }
             MiddlewareAction::InjectMessage => {
@@ -1353,7 +1384,13 @@ impl AgentLoop {
                     }
                     Err(err) => {
                         tracing::error!(target: "agent_loop", "Context compaction failed: {}", err);
-                        return Err(format!("Context compaction failed: {}", err));
+                        let msg = format!("Context compaction failed: {}", err);
+                        let _ = self.session_store.append(crate::session::SessionEvent::TurnEnd {
+                            turn: self.current_turn,
+                            reason: crate::session::TurnEndReason::Error { message: msg.clone() },
+                            ts: now_ts(),
+                        });
+                        return Err(msg);
                     }
                 }
             }
@@ -1369,8 +1406,8 @@ impl AgentLoop {
         tracing::debug!(target: "agent_loop",
             model = %model.name,
             provider = %model.provider,
-            temperature = ?model.temperature,
-            max_tokens = ?model.max_tokens,
+            temperature = ?model.effective_temperature(),
+            max_tokens = ?model.effective_max_tokens(),
             "Using model configuration"
         );
 
@@ -1388,8 +1425,8 @@ impl AgentLoop {
             // Honor an external stop request before each LLM call. This mirrors
             // deepseek-harness emitting `finish_reason == "stop"`: the turn ends
             // cleanly with a final assistant event flagged as middleware-stopped.
-            if self.abort_requested() {
-                tracing::info!(target: "agent_loop", "Turn aborted by external request");
+            if let Some(cause) = self.abort_requested() {
+                tracing::info!(target: "agent_loop", "Turn aborted by external request (cause: {:?})", cause);
                 let _ = self
                     .event_tx
                     .send(BaseEvent::Assistant(AssistantEvent {
@@ -1397,8 +1434,14 @@ impl AgentLoop {
                         stopped_by_middleware: true,
                         message_id: None,
                     }));
+                // Close the (already started) turn as aborted before returning,
+                // recording the actual cancel cause from the abort signal.
+                let _ = self.session_store.append(crate::session::SessionEvent::TurnEnd {
+                    turn: self.current_turn,
+                    reason: crate::session::TurnEndReason::Aborted { cause },
+                    ts: now_ts(),
+                });
                 self.save_messages();
-                self.current_turn += 1;
                 return Ok(vec![]);
             }
 
@@ -1461,9 +1504,9 @@ impl AgentLoop {
                 .complete(
                     &model,
                     &backend_messages,
-                    model.temperature.unwrap_or(0.2),
+                    model.effective_temperature(),
                     if available_tools.is_empty() { None } else { Some(&available_tools) },
-                    model.max_tokens.map(|t| t as u32),
+                    model.effective_max_tokens().map(|t| t as u32),
                     Some(ToolChoice::Auto),
                     None,
                 )
@@ -1616,6 +1659,10 @@ impl AgentLoop {
                                     if let Some(crate::tools::pipeline::PipelineFlow::Deny(reason)) = pipeline_flow {
                                         serde_json::json!({"error": reason})
                                     } else if let Some(crate::tools::pipeline::PipelineFlow::Allow(out)) = pipeline_flow {
+                                        // PostToolUse: let pipeline stages rewrite the
+                                        // hook-provided output before it reaches the model.
+                                        let mut out = out;
+                                        self.tool_pipeline.run_post(&pipeline_ctx, &mut out).await;
                                         let value = self
                                             .consume_tool_output(tool, out, &tool_call_id, &call.function.name)
                                             .await;
@@ -1636,6 +1683,7 @@ impl AgentLoop {
                                                 session_dir: self.session_dir.clone(),
                                                 scratchpad_dir: None,
                                                 user_input_callback: self.user_input_callback.clone(),
+                                                abort: self.abort_rx.clone(),
                                             };
 
                                             tracing::debug!(target: "agent_loop.tool_call",
@@ -1651,6 +1699,14 @@ impl AgentLoop {
                                                         "Tool invocation succeeded"
                                                     );
                                                     self.stats.lock().unwrap().tool_calls_succeeded += 1;
+                                                    // PostToolUse: pipeline stages may rewrite the
+                                                    // tool result before it is surfaced to the model.
+                                                    let mut out = ToolOutput::Result(value);
+                                                    self.tool_pipeline.run_post(&pipeline_ctx, &mut out).await;
+                                                    let value = match out {
+                                                        ToolOutput::Result(v) => v,
+                                                        _ => serde_json::json!({}),
+                                                    };
                                                     // Decouple canonical value (logged) from model-visible content.
                                                     self.push_tool_result(
                                                         tool,
@@ -1669,6 +1725,14 @@ impl AgentLoop {
                                                     );
                                                     self.stats.lock().unwrap().tool_calls_succeeded += 1;
                                                     let value = self.handle_tool_stream(event);
+                                                    // PostToolUse: pipeline stages may rewrite the
+                                                    // tool result before it is surfaced to the model.
+                                                    let mut out = ToolOutput::Result(value);
+                                                    self.tool_pipeline.run_post(&pipeline_ctx, &mut out).await;
+                                                    let value = match out {
+                                                        ToolOutput::Result(v) => v,
+                                                        _ => serde_json::json!({}),
+                                                    };
                                                     self.push_tool_result(
                                                         tool,
                                                         &value,
@@ -1740,11 +1804,20 @@ impl AgentLoop {
                                                     session_dir: self.session_dir.clone(),
                                                     scratchpad_dir: None,
                                                     user_input_callback: self.user_input_callback.clone(),
+                                                    abort: self.abort_rx.clone(),
                                                 };
 
                                                 match tool.invoke(args_json, invoke).await {
                                                     Ok(ToolOutput::Result(value)) => {
                                                         self.stats.lock().unwrap().tool_calls_succeeded += 1;
+                                                        // PostToolUse: pipeline stages may rewrite the
+                                                        // tool result before it is surfaced to the model.
+                                                        let mut out = ToolOutput::Result(value);
+                                                        self.tool_pipeline.run_post(&pipeline_ctx, &mut out).await;
+                                                        let value = match out {
+                                                            ToolOutput::Result(v) => v,
+                                                            _ => serde_json::json!({}),
+                                                        };
                                                         self.push_tool_result(
                                                             tool,
                                                             &value,
@@ -1758,6 +1831,14 @@ impl AgentLoop {
                                                     Ok(ToolOutput::Stream(event)) => {
                                                         self.stats.lock().unwrap().tool_calls_succeeded += 1;
                                                         let value = self.handle_tool_stream(event);
+                                                        // PostToolUse: pipeline stages may rewrite the
+                                                        // tool result before it is surfaced to the model.
+                                                        let mut out = ToolOutput::Result(value);
+                                                        self.tool_pipeline.run_post(&pipeline_ctx, &mut out).await;
+                                                        let value = match out {
+                                                            ToolOutput::Result(v) => v,
+                                                            _ => serde_json::json!({}),
+                                                        };
                                                         self.push_tool_result(
                                                             tool,
                                                             &value,
@@ -1875,10 +1956,15 @@ impl AgentLoop {
                 }
                 Err(err) => {
                     let error_msg = format!("LLM error: {}", err);
-                    tracing::error!(target: "agent_loop.llm_response", 
+                    tracing::error!(target: "agent_loop.llm_response",
                         error = %err,
                         "LLM API call failed"
                     );
+                    let _ = self.session_store.append(crate::session::SessionEvent::TurnEnd {
+                        turn: self.current_turn,
+                        reason: crate::session::TurnEndReason::Error { message: error_msg.clone() },
+                        ts: now_ts(),
+                    });
                     return Err(error_msg);
                 }
             }
@@ -1888,9 +1974,33 @@ impl AgentLoop {
         self.save_messages();
         self.publish_events(&events);
 
+        // Stop hook (harness `Stop` hook equivalent): last chance to inject
+        // follow-up context or abort the turn with a `Hook` cause before it is
+        // closed in the log.
+        let stopping_ctx = crate::agent::middleware::TurnStoppingContext {
+            working_dir: self.working_dir.clone(),
+            session_dir: self.session_dir.clone(),
+            auto_approve: self.auto_approve,
+            transcript_len: self.messages().len(),
+        };
+        match self.middleware_pipeline.run_turn_stopping(&stopping_ctx).await {
+            crate::agent::middleware::TurnStoppingDecision::Inject(msg) => {
+                self.push_message(msg);
+            }
+            crate::agent::middleware::TurnStoppingDecision::Abort(_reason) => {
+                // Close the turn as aborted-by-hook, then return without the
+                // normal `Completed` finalize.
+                self.finalize_turn_stats(crate::session::TurnEndReason::Aborted {
+                    cause: crate::session::AgentCancelCause::Hook,
+                });
+                return Ok(events);
+            }
+            crate::agent::middleware::TurnStoppingDecision::Continue => {}
+        }
+
         // Finalize per-turn stats (persist TurnStats + update AgentStats) and
         // emit the live usage event after the turn events.
-        self.finalize_turn_stats();
+        self.finalize_turn_stats(crate::session::TurnEndReason::Completed);
 
         Ok(events)
     }
@@ -2078,6 +2188,12 @@ impl AgentLoop {
         self.current_turn += 1;
         self.stats.lock().unwrap().steps = self.current_turn;
 
+        // Open the turn in the log (mirrors deepseek-harness `turn/start`).
+        let _ = self.session_store.append(crate::session::SessionEvent::TurnStart {
+            turn: self.current_turn,
+            ts: now_ts(),
+        });
+
         let user_msg = LLMMessage::user(&user_text);
         self.push_message(user_msg.clone());
 
@@ -2120,7 +2236,13 @@ impl AgentLoop {
                     }
                     Err(err) => {
                         tracing::error!(target: "agent_loop", "Context compaction failed: {}", err);
-                        return Err(format!("Context compaction failed: {}", err));
+                        let msg = format!("Context compaction failed: {}", err);
+                        let _ = self.session_store.append(crate::session::SessionEvent::TurnEnd {
+                            turn: self.current_turn,
+                            reason: crate::session::TurnEndReason::Error { message: msg.clone() },
+                            ts: now_ts(),
+                        });
+                        return Err(msg);
                     }
                 }
             }
@@ -2146,8 +2268,8 @@ impl AgentLoop {
             // Honor an external stop request before each LLM call. Mirrors
             // deepseek-harness `finish_reason == "stop"`: the turn ends cleanly
             // with a final assistant event flagged as middleware-stopped.
-            if self.abort_requested() {
-                tracing::info!(target: "agent_loop", "Streaming turn aborted by external request");
+            if let Some(cause) = self.abort_requested() {
+                tracing::info!(target: "agent_loop", "Streaming turn aborted by external request (cause: {:?})", cause);
                 let _ = self
                     .event_tx
                     .send(BaseEvent::Assistant(AssistantEvent {
@@ -2156,7 +2278,13 @@ impl AgentLoop {
                         message_id: None,
                     }));
                 self.save_messages();
-                self.current_turn += 1;
+                // Close the (already started) turn as aborted before returning,
+                // recording the actual cancel cause from the abort signal.
+                let _ = self.session_store.append(crate::session::SessionEvent::TurnEnd {
+                    turn: self.current_turn,
+                    reason: crate::session::TurnEndReason::Aborted { cause },
+                    ts: now_ts(),
+                });
                 return Ok(vec![]);
             }
 
@@ -2221,14 +2349,22 @@ impl AgentLoop {
                 .complete_streaming(
                     &model,
                     &backend_messages,
-                    model.temperature.unwrap_or(0.2),
+                    model.effective_temperature(),
                     if available_tools.is_empty() { None } else { Some(&available_tools) },
-                    model.max_tokens.map(|t| t as u32),
+                    model.effective_max_tokens().map(|t| t as u32),
                     Some(ToolChoice::Auto),
                     None,
                 )
                 .await
-                .map_err(|e| format!("Streaming error: {}", e))?;
+                .map_err(|e| {
+                    let error_msg = format!("Streaming error: {}", e);
+                    let _ = self.session_store.append(crate::session::SessionEvent::TurnEnd {
+                        turn: self.current_turn,
+                        reason: crate::session::TurnEndReason::Error { message: error_msg.clone() },
+                        ts: now_ts(),
+                    });
+                    error_msg
+                })?;
 
             use futures::StreamExt;
             use std::pin::Pin;
@@ -2254,7 +2390,7 @@ impl AgentLoop {
                 // Allow an external stop to interrupt a streaming LLM response:
                 // break out of the token loop and let the outer turn loop emit
                 // the `stopped_by_middleware` assistant event.
-                if self.abort_requested() {
+                if self.abort_requested().is_some() {
                     tracing::info!(target: "agent_loop", "Streaming response aborted mid-token by external request");
                     break;
                 }
@@ -2456,6 +2592,10 @@ impl AgentLoop {
                         if let Some(crate::tools::pipeline::PipelineFlow::Deny(reason)) = pipeline_flow {
                             serde_json::json!({"error": reason})
                         } else if let Some(crate::tools::pipeline::PipelineFlow::Allow(out)) = pipeline_flow {
+                            // PostToolUse: let pipeline stages rewrite the
+                            // hook-provided output before it reaches the model.
+                            let mut out = out;
+                            self.tool_pipeline.run_post(&pipeline_ctx, &mut out).await;
                             let value = self
                                 .consume_tool_output(tool, out, &tool_call_id, &call.function.name)
                                 .await;
@@ -2475,11 +2615,20 @@ impl AgentLoop {
                                     session_dir: self.session_dir.clone(),
                                     scratchpad_dir: None,
                                     user_input_callback: self.user_input_callback.clone(),
+                                    abort: self.abort_rx.clone(),
                                 };
 
                                 match tool.invoke(args_json, invoke).await {
                                     Ok(ToolOutput::Result(value)) => {
                                         self.stats.lock().unwrap().tool_calls_succeeded += 1;
+                                        // PostToolUse: pipeline stages may rewrite the
+                                        // tool result before it is surfaced to the model.
+                                        let mut out = ToolOutput::Result(value);
+                                        self.tool_pipeline.run_post(&pipeline_ctx, &mut out).await;
+                                        let value = match out {
+                                            ToolOutput::Result(v) => v,
+                                            _ => serde_json::json!({}),
+                                        };
                                         self.push_tool_result(
                                             tool,
                                             &value,
@@ -2493,6 +2642,14 @@ impl AgentLoop {
                                     Ok(ToolOutput::Stream(event)) => {
                                         self.stats.lock().unwrap().tool_calls_succeeded += 1;
                                         let value = self.handle_tool_stream(event);
+                                        // PostToolUse: pipeline stages may rewrite the
+                                        // tool result before it is surfaced to the model.
+                                        let mut out = ToolOutput::Result(value);
+                                        self.tool_pipeline.run_post(&pipeline_ctx, &mut out).await;
+                                        let value = match out {
+                                            ToolOutput::Result(v) => v,
+                                            _ => serde_json::json!({}),
+                                        };
                                         self.push_tool_result(
                                             tool,
                                             &value,
@@ -2557,6 +2714,7 @@ impl AgentLoop {
                                         session_dir: self.session_dir.clone(),
                                         scratchpad_dir: None,
                                         user_input_callback: self.user_input_callback.clone(),
+                                        abort: self.abort_rx.clone(),
                                     };
 
                                     match tool.invoke(args_json, invoke).await {
@@ -2672,9 +2830,33 @@ impl AgentLoop {
         self.save_messages();
         self.publish_events(&events);
 
+        // Stop hook (harness `Stop` hook equivalent): last chance to inject
+        // follow-up context or abort the turn with a `Hook` cause before it is
+        // closed in the log.
+        let stopping_ctx = crate::agent::middleware::TurnStoppingContext {
+            working_dir: self.working_dir.clone(),
+            session_dir: self.session_dir.clone(),
+            auto_approve: self.auto_approve,
+            transcript_len: self.messages().len(),
+        };
+        match self.middleware_pipeline.run_turn_stopping(&stopping_ctx).await {
+            crate::agent::middleware::TurnStoppingDecision::Inject(msg) => {
+                self.push_message(msg);
+            }
+            crate::agent::middleware::TurnStoppingDecision::Abort(_reason) => {
+                // Close the turn as aborted-by-hook, then return without the
+                // normal `Completed` finalize.
+                self.finalize_turn_stats(crate::session::TurnEndReason::Aborted {
+                    cause: crate::session::AgentCancelCause::Hook,
+                });
+                return Ok(events);
+            }
+            crate::agent::middleware::TurnStoppingDecision::Continue => {}
+        }
+
         // Finalize per-turn stats (persist TurnStats + update AgentStats) and
         // emit the live usage event after the turn events.
-        self.finalize_turn_stats();
+        self.finalize_turn_stats(crate::session::TurnEndReason::Completed);
 
         Ok(events)
     }
@@ -3212,6 +3394,7 @@ mod tests {
             temperature: Some(0.0),
             max_tokens: None,
             auto_compact_threshold: None,
+            top_p: None,
         };
         let mut a = agent().with_model(model).with_tools(vec![Arc::new(EchoTool)]);
 

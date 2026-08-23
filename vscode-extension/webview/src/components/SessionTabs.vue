@@ -10,6 +10,9 @@ function close(id: string, ev: Event) {
   ev.stopPropagation();
   store.closeTab(id);
 }
+function addNew() {
+  void store.newSession();
+}
 
 // Double-click a tab title to rename it inline.
 const editingId = ref<string | null>(null);
@@ -72,7 +75,14 @@ function cancelRename() {
           >×</span
         >
       </div>
+      <button
+        v-if="store.tabs.length === 0"
+        class="empty-hint"
+        @click="addNew"
+        title="新建会话"
+      >新建会话</button>
     </div>
+    <button class="add" @click="addNew" title="新建会话 (Ctrl/Cmd+Shift+L)">＋</button>
   </div>
 </template>
 
@@ -83,7 +93,7 @@ function cancelRename() {
   gap: 4px;
   padding: 3px 4px;
   border-bottom: 1px solid var(--vscode-panel-border, #333);
-  background: rgba(127, 127, 127, 0.04);
+  background: rgba(127, 127, 127, 0.08);
 }
 .icon-btn {
   flex: 0 0 auto;
@@ -95,6 +105,38 @@ function cancelRename() {
   gap: 2px;
   flex: 1;
   overflow-x: auto;
+  min-height: 26px;
+  align-items: center;
+}
+.empty-hint {
+  padding: 2px 8px;
+  border: 1px dashed var(--vscode-panel-border, #555);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vscode-foreground, #ddd);
+  opacity: 0.7;
+  cursor: pointer;
+  font: inherit;
+}
+.empty-hint:hover {
+  opacity: 1;
+  border-color: var(--vscode-focusBorder, #0078d4);
+}
+.add {
+  flex: 0 0 auto;
+  width: 26px;
+  margin-left: auto;
+  border: 1px solid var(--vscode-panel-border, #333);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
+  color: var(--vscode-foreground, #ddd);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.add:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(255, 255, 255, 0.16));
+  border-color: var(--vscode-focusBorder, #0078d4);
 }
 .tab {
   display: flex;

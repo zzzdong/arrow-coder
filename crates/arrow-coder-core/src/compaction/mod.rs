@@ -85,9 +85,9 @@ impl Compactor for TokenPressureCompactor {
             .complete(
                 model,
                 &compact_messages,
-                0.2,
+                model.effective_temperature(),
                 None,
-                model.max_tokens,
+                model.effective_max_tokens(),
                 None,
                 None,
             )

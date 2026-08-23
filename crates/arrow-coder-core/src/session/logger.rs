@@ -46,8 +46,10 @@ impl SessionLogger {
         let session_start_time = format!("{:?}", SystemTime::now());
 
         let session_dir = if config.enabled {
-            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            let folder_name = format!("{}_{}_{}", config.session_prefix, timestamp, &session_id[..8]);
+            let folder_name = crate::session::session_id::session_dir_name(
+                &config.session_prefix,
+                &session_id,
+            );
             let dir = config.save_dir.join(folder_name);
             fs::create_dir_all(&dir).ok();
             Some(dir)

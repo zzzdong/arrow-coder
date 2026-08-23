@@ -186,6 +186,8 @@ struct DeepSeekChatRequest {
     tool_choice: Option<serde_json::Value>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -513,6 +515,7 @@ impl DeepSeekChatBackend {
             tools: tools.map(|t| t.to_vec()),
             tool_choice: tool_choice_value,
             temperature,
+            top_p: model.effective_top_p(),
             max_tokens,
             stream,
             stream_options: if stream {
@@ -1469,6 +1472,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             auto_compact_threshold: None,
+            top_p: None,
         }
     }
 

@@ -1,6 +1,8 @@
 pub mod commands;
 pub mod config;
-pub mod error;
+pub use config::repository::{
+    AgentConfig, ConfigChange, ConfigDomain, ConfigRepository, LocalConfigRepository, ModelSummary,
+};pub mod error;
 pub mod estimate;
 pub mod paths;
 pub mod rewind;

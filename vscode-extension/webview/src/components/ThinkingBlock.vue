@@ -3,7 +3,7 @@
 // The parent passes `open` (currently expanded) and `userExpanded` (whether the
 // user explicitly opened it). When the user toggles it we record that intent in
 // `userExpanded` so the store will NOT auto-collapse it on turn completion.
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { renderMarkdown, ensureClosedFences } from '../markdown';
 
 const props = defineProps<{
@@ -16,6 +16,25 @@ const emit = defineEmits<{
   'update:userExpanded': [boolean];
 }>();
 
+const detailsEl = ref<HTMLDetailsElement | null>(null);
+// When the store flips `open` (e.g. auto-collapse on turn completion), we set
+// the `<details>` property imperatively. That programmatic flip fires a `toggle`
+// event, which we must NOT treat as a user action (otherwise it would wrongly
+// mark `userExpanded` and could fight the store). `suppressNextToggle` guards
+// exactly that one synthetic event.
+const suppressNextToggle = ref(false);
+watch(
+  () => props.open,
+  (next) => {
+    const el = detailsEl.value;
+    if (el && el.open !== next) {
+      suppressNextToggle.value = true;
+      el.open = next;
+    }
+  },
+  { immediate: true },
+);
+
 // Render the reasoning prose as markdown (code fences, lists, tables, emphasis
 // all work). `renderMarkdown` keeps `html: false`, so model content cannot
 // inject executable markup. The `computed` re-renders on every streamed update,
@@ -26,9 +45,16 @@ const thinkHtml = computed(() =>
 
 function onToggle(e: Event) {
   const details = e.target as HTMLDetailsElement;
+  if (suppressNextToggle.value) {
+    // This toggle was caused by our own watch setting `el.open`; ignore it so it
+    // doesn't get recorded as a user intent (which would disable auto-collapse).
+    suppressNextToggle.value = false;
+    return;
+  }
   emit('update:open', details.open);
-  // Any user interaction marks the block as explicitly user-controlled, so the
-  // auto-collapse on `done` respects their choice (even if they collapse it).
+  // A genuine user interaction marks the block as explicitly user-controlled,
+  // so the auto-collapse on `done` respects their choice (even if they collapse
+  // it themselves).
   emit('update:userExpanded', true);
 }
 
@@ -64,7 +90,7 @@ function onBodyClick(e: MouseEvent) {
 </script>
 
 <template>
-  <details class="thinking-block" :open="props.open" @toggle="onToggle">
+  <details ref="detailsEl" class="thinking-block" @toggle="onToggle">
     <summary class="think-head">
       <span class="think-icon">💭</span>
       <span>{{ props.text ? '思考过程' : '思考中…' }}</span>

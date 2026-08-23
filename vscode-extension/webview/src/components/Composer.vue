@@ -361,15 +361,9 @@ function focusInput() {
         <ContextMeter />
       </div>
 
-      <!-- Right group: undo + send/stop. Stop only shows while busy so the
+      <!-- Right group: send/stop. Stop only shows while busy so the
            send button is the resting primary (harness Send↔Stop swap). -->
       <div class="actions-right">
-        <button
-          class="act-btn act-undo"
-          :disabled="!store.ready || store.busy"
-          title="Undo last turn"
-          @click="store.undo()"
-        >↩</button>
         <button
           v-if="store.busy"
           class="act-btn act-stop"

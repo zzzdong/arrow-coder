@@ -189,7 +189,7 @@ impl Tool for BashSessionTool {
     async fn invoke(
         &self,
         args: serde_json::Value,
-        _ctx: InvokeContext,
+        ctx: InvokeContext,
     ) -> Result<ToolOutput> {
         let args: BashSessionArgs = serde_json::from_value(args)?;
         let guard = sessions().0.lock().await;
@@ -331,6 +331,10 @@ impl Tool for BashSessionTool {
                     std::sync::Arc::new(tokio::sync::Mutex::new(Some(child)));
                 let child_clone = std::sync::Arc::clone(&child_arc);
 
+                // The abort signal cloned in so we can stop early when the turn is
+                // cancelled (mirrors deepseek-harness passing the turn's AbortSignal
+                // into tool execution so a long-running command is killed).
+                let mut abort_rx = ctx.abort.clone();
                 let wait = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout),
                     async move {
@@ -347,10 +351,30 @@ impl Tool for BashSessionTool {
                             }
                         });
                         let _ = tokio::join!(so_task, se_task);
-                        if let Some(mut c) = child_clone.lock().await.take() {
-                            c.wait().await
-                        } else {
-                            Ok(std::process::ExitStatus::default())
+                        let child_wait = async {
+                            if let Some(mut c) = child_clone.lock().await.take() {
+                                c.wait().await
+                            } else {
+                                Ok(std::process::ExitStatus::default())
+                            }
+                        };
+                        tokio::select! {
+                            status = child_wait => status,
+                            _ = async {
+                                match abort_rx.as_mut() {
+                                    Some(rx) => { let _ = rx.changed().await; }
+                                    None => std::future::pending::<()>().await,
+                                }
+                                // Kill the child process group on cancellation.
+                                if let Some(mut c) = child_clone.lock().await.take() {
+                                    let _ = c.kill().await;
+                                }
+                            } => {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::Interrupted,
+                                    "command cancelled",
+                                ))
+                            }
                         }
                     },
                 )
@@ -358,7 +382,24 @@ impl Tool for BashSessionTool {
 
                 let exit_status = match wait {
                     Ok(Ok(s)) => s,
-                    Ok(Err(e)) => return Err(ArrowError::Tool(format!("Command failed: {e}"))),
+                    Ok(Err(e)) => {
+                        // A cancellation interrupt is reported back to the model as
+                        // a `cancelled` tool result (mirrors deepseek-harness: a
+                        // cancelled tool still returns its partial output rather than
+                        // an opaque error). Other failures stay errors.
+                        if e.kind() == std::io::ErrorKind::Interrupted {
+                            let stdout_out = stdout_lines.lock().await.join("\n");
+                            let stderr_out = stderr_lines.lock().await.join("\n");
+                            return Ok(ToolOutput::Result(json!({
+                                "command": command,
+                                "cancelled": true,
+                                "exit_code": -1,
+                                "stdout": stdout_out,
+                                "stderr": stderr_out,
+                            })));
+                        }
+                        return Err(ArrowError::Tool(format!("Command failed: {e}")));
+                    }
                     Err(_) => {
                         if let Some(mut c) = child_arc.lock().await.take() {
                             let _ = c.kill().await;

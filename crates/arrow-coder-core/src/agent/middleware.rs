@@ -1,5 +1,8 @@
 pub use crate::core::types::ConversationContext;
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::core::LLMMessage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MiddlewareAction {
@@ -7,6 +10,24 @@ pub enum MiddlewareAction {
     Stop,
     Compact,
     InjectMessage,
+}
+
+/// Context handed to a turn-stopping hook (harness `Stop` hook equivalent).
+/// Carries a lightweight snapshot of the loop at the moment the turn ends.
+pub struct TurnStoppingContext {
+    pub working_dir: PathBuf,
+    pub session_dir: Option<PathBuf>,
+    pub auto_approve: bool,
+    pub transcript_len: usize,
+}
+
+/// Decision of a turn-stopping hook. Mirrors harness `Stop` hook output: it may
+/// inject follow-up context into the transcript, or abort the turn (recorded
+/// with `AgentCancelCause::Hook`).
+pub enum TurnStoppingDecision {
+    Continue,
+    Inject(LLMMessage),
+    Abort(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +59,14 @@ impl Default for MiddlewareResult {
 pub trait Middleware: Send + Sync {
     async fn before_turn(&self, context: &mut ConversationContext) -> MiddlewareResult;
     fn reset(&mut self, _reason: ResetReason) {}
+
+    /// Runs when a turn is about to end (harness `Stop` hook equivalent). May
+    /// inject follow-up context into the transcript or abort the turn with a
+    /// `Hook` cause. Default: no-op (continue). Implementations that need to
+    /// steer the turn's end override this.
+    async fn on_turn_stopping(&self, _ctx: &TurnStoppingContext) -> TurnStoppingDecision {
+        TurnStoppingDecision::Continue
+    }
 }
 
 /// Middleware that limits the number of turns
@@ -234,6 +263,25 @@ impl MiddlewarePipeline {
             }
         }
         MiddlewareResult::default()
+    }
+
+    /// Runs all turn-stopping hooks (harness `Stop` hook equivalent) in order.
+    /// An `Abort` short-circuits and ends the turn with a `Hook` cause; an
+    /// `Inject` accumulates (last one wins) and is surfaced as a follow-up
+    /// message appended to the transcript. `Continue` is a no-op pass-through.
+    pub async fn run_turn_stopping(&self, ctx: &TurnStoppingContext) -> TurnStoppingDecision {
+        let mut injected: Option<LLMMessage> = None;
+        for middleware in &self.middlewares {
+            match middleware.on_turn_stopping(ctx).await {
+                TurnStoppingDecision::Abort(reason) => return TurnStoppingDecision::Abort(reason),
+                TurnStoppingDecision::Inject(msg) => injected = Some(msg),
+                TurnStoppingDecision::Continue => {}
+            }
+        }
+        match injected {
+            Some(msg) => TurnStoppingDecision::Inject(msg),
+            None => TurnStoppingDecision::Continue,
+        }
     }
 
     pub fn reset(&mut self, reason: ResetReason) {

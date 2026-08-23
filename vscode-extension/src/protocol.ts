@@ -174,23 +174,47 @@ export interface ConfigParams {
 }
 
 /** A model definition. Mirrors core `ModelConfig`; self-contained (provider +
- *  URL + key). `provider` is one of `"deepseek"` | `"openai_compatible"`. */
+ *  URL + key). `provider` references a built-in preset: `"deepseek"` |
+ *  `"openai"` | `"anthropic"` | `"local"` | `"openai_compatible"`. */
 export interface ConfigModel {
   /** Display identifier used in the selector and `active_model`. */
   name: string;
-  /** Model id sent to the API (e.g. `deepseek-chat`, `deepseek-reasoner`). */
+  /** Model id sent to the API (e.g. `deepseek-chat`, `deepseek-v4-flash`). */
   model_id: string;
-  /** Provider kind — `"deepseek"` | `"openai_compatible"`. */
+  /** Provider preset name: `"deepseek"` | `"openai"` | `"anthropic"` |
+   *  `"local"` | `"openai_compatible"`. Supplies endpoint/key defaults. */
   provider: string;
-  /** Optional API base URL; omitted -> provider default. */
+  /** Optional API base URL; omitted -> provider preset default. */
   endpoint?: string | null;
-  /** Optional API key; omitted -> `{PROVIDER}_API_KEY` env. */
+  /** Optional API key; omitted -> `{PROVIDER}_API_KEY` env (or the preset's
+   *  key env var). Inline key overrides the env var. */
   api_key?: string | null;
   thinking?: string | null;
   reasoning_effort?: string | null;
   temperature?: number | null;
+  top_p?: number | null;
   max_tokens?: number | null;
   auto_compact_threshold?: number | null;
+}
+
+/** A single built-in model offered by a provider (from `models/builtin`). */
+export interface BuiltinModel {
+  model_id: string;
+  label: string;
+  thinking?: string;
+  reasoning_effort?: string;
+}
+
+/** A provider entry in the built-in catalog. */
+export interface BuiltinProvider {
+  provider: string;
+  key_env: string;
+  models: BuiltinModel[];
+}
+
+/** Response of the `models/builtin` request: the full built-in catalog. */
+export interface BuiltinCatalog {
+  providers: BuiltinProvider[];
 }
 
 /** The editable configuration view sent to the settings panel and echoed back

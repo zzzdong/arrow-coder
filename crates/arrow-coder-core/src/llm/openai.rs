@@ -19,6 +19,8 @@ struct OpenAIRequest {
     messages: Vec<OpenAIMessage>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
@@ -443,6 +445,7 @@ impl OpenAIBackend {
             model: model.name.clone(),
             messages: self.convert_messages(messages),
             temperature,
+            top_p: model.effective_top_p(),
             tools: tools.map(|t| self.convert_tools(t)),
             tool_choice: self.convert_tool_choice(tool_choice.as_ref()),
             max_tokens,

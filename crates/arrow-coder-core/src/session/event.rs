@@ -20,6 +20,17 @@ pub type EventTs = u64;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum SessionEvent {
+    /// Marker for the start of a turn (a single user->assistant round). Mirrors
+    /// deepseek-harness `turn/start`: a persistent, replayable boundary that
+    /// lets the UI/projectors segment the log into turns. Log-only metadata —
+    /// never projected into the LLM message history.
+    TurnStart { turn: u32, ts: EventTs },
+    /// Marker for the end of a turn, carrying *why* the turn ended. Mirrors
+    /// deepseek-harness `turn/end` (with `reason`), so abort/error/max-tokens
+    /// terminations are first-class in the log instead of implicit. The session
+    /// itself is passive (it only holds the log); the cancel/stop signal lives
+    /// in the agent driver, which writes this event with the appropriate reason.
+    TurnEnd { turn: u32, reason: TurnEndReason, ts: EventTs },
     /// A user submitted a message.
     UserMessage { text: String, ts: EventTs },
     /// A streaming text delta from the assistant.
@@ -97,10 +108,85 @@ impl SessionEvent {
             | SessionEvent::Compaction { ts, .. }
             | SessionEvent::TodoWrite { ts, .. }
             | SessionEvent::TurnStats { ts, .. }
-            | SessionEvent::Command { ts, .. } => Some(*ts),
+            | SessionEvent::Command { ts, .. }
+            | SessionEvent::TurnStart { ts, .. }
+            | SessionEvent::TurnEnd { ts, .. } => Some(*ts),
             SessionEvent::Unknown { .. } => None,
         }
     }
+}
+
+/// Why a turn ended. Mirrors deepseek-harness `TurnEndReason`: the session log
+/// records not just that a turn finished, but *how* (clean completion, abort,
+/// error, token limit, or external interrupt). This keeps turn termination
+/// first-class and replayable instead of implicit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TurnEndReason {
+    /// The turn ran to a natural completion (no more tool calls / stop).
+    Completed,
+    /// The turn was aborted. `cause` records who/what triggered the abort
+    /// (aligned with deepseek-harness `AgentCancelCause`).
+    Aborted { cause: AgentCancelCause },
+    /// The turn ended because of an error. `message` is the error detail.
+    Error { message: String },
+    /// The model hit its max-tokens limit before finishing.
+    MaxTokens,
+    /// The turn was interrupted by an external signal (e.g. user pressed
+    /// Ctrl-C, or the host disconnected) without a clean abort cause.
+    Interrupted,
+}
+
+/// Who/what caused an agent activity to be cancelled. Mirrors deepseek-harness
+/// `AgentCancelCause`. The session is passive; this reason is supplied by the
+/// agent driver when it writes the `TurnEnd` event.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCancelCause {
+    /// The user explicitly cancelled (e.g. UI stop button / Ctrl-C).
+    #[default]
+    User,
+    /// A parent agent / sub-agent orchestrator cancelled this activity.
+    Parent,
+    /// A hook (Pre/Post-Tool, Stop, etc.) requested cancellation.
+    Hook,
+    /// The session/host was disposed (shutdown, session deleted).
+    Disposed,
+}
+
+/// An abort request carrying *why* the activity was cancelled. Mirrors
+/// deepseek-harness, where `Agent.cancel(cause)` propagates an
+/// `AgentCancelCause` alongside the stop signal. Replaces a bare `bool`
+/// watch channel so the cancel source is first-class and surfaced in the
+/// `TurnEnd` reason instead of always defaulting to `User`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AbortSignal {
+    pub requested: bool,
+    pub cause: AgentCancelCause,
+}
+
+impl AbortSignal {
+    /// Build a triggered signal with the given cancel cause.
+    pub fn trigger(cause: AgentCancelCause) -> Self {
+        Self {
+            requested: true,
+            cause,
+        }
+    }
+}
+
+/// An event wrapped with its log sequence number, mirroring deepseek-harness
+/// `seq = log.length`. `seq` is the event's 0-based position in the append-only
+/// log and is assigned by the writer from that position; it is immutable once
+/// written (a `flush` rewrites the whole file in the same order, so seq is
+/// recomputed to the same value). `event` carries the actual [`SessionEvent`]
+/// (flattened so the on-disk JSON keeps the same `event` tag shape).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequencedEvent {
+    #[serde(flatten)]
+    pub event: SessionEvent,
+    #[serde(default)]
+    pub seq: u64,
 }
 
 /// Role of a unified UI message (projected from the session log). This is the

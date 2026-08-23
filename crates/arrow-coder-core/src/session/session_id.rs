@@ -47,6 +47,14 @@ pub fn shorten_session_id(session_id: &str, from_end: bool) -> String {
     }
 }
 
+/// The on-disk folder name for a session, shared by [`SessionLogger`] and
+/// [`LocalSessionRepository`] so the directory layout has a single source of
+/// truth. Format: `<prefix>_<local_timestamp>_<id[..8]>`.
+pub fn session_dir_name(prefix: &str, session_id: &str) -> String {
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    format!("{}_{}_{}", prefix, timestamp, &session_id[..8])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

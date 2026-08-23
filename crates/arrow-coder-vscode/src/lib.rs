@@ -12,5 +12,6 @@ pub mod host;
 pub mod jsonrpc;
 pub mod workspace;
 
+pub use host::HandleOutcome;
 pub use host::Host;
 pub use jsonrpc::{ChatParams, EmptyParams, Event, InitializeParams, Request};

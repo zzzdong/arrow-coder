@@ -155,51 +155,6 @@ impl WorkspaceIndex {
         self.persist();
     }
 
-    /// Update a session's title in place (e.g. on first user prompt).
-    pub fn rename_session(&mut self, cwd: &str, session_id: &str, title: &str) {
-        let now = now_millis();
-        if let Some(entry) = self.workspaces.get_mut(cwd) {
-            entry.last_seen = now;
-            for s in &mut entry.sessions {
-                if s.id == session_id {
-                    s.title = title.to_string();
-                }
-            }
-            self.persist();
-        }
-    }
-
-    /// Resolve the owning workspace `cwd` for a session id, or `None` if the
-    /// session is not present in the registry.
-    pub fn find_session_cwd(&self, session_id: &str) -> Option<String> {
-        for entry in self.workspaces.values() {
-            if entry.sessions.iter().any(|s| s.id == session_id) {
-                return Some(entry.path.clone());
-            }
-        }
-        None
-    }
-
-    /// Set a session's title only if it is currently empty. Used to seed a
-    /// conversation's title from its first user prompt without clobbering a
-    /// later explicit rename.
-    pub fn ensure_session_title(&mut self, cwd: &str, session_id: &str, title: &str) {
-        let now = now_millis();
-        if let Some(entry) = self.workspaces.get_mut(cwd) {
-            let mut changed = false;
-            for s in &mut entry.sessions {
-                if s.id == session_id && s.title.is_empty() {
-                    s.title = title.to_string();
-                    changed = true;
-                }
-            }
-            if changed {
-                entry.last_seen = now;
-                self.persist();
-            }
-        }
-    }
-
     /// Remove a session from its workspace. If the workspace becomes empty it
     /// is pruned entirely.
     pub fn remove_session(&mut self, cwd: &str, session_id: &str) {

@@ -223,7 +223,7 @@ impl Tool for TaskTool {
         let parent_loop = AgentLoop::new(AgentLoopConfig {
             max_turns: Some(5),
             max_price: None,
-            max_session_tokens: model.max_tokens.map(|t| t as u64),
+            max_session_tokens: model.effective_max_tokens().map(|t| t as u64),
             auto_compact_threshold: None,
         })
         .with_backend(backend.clone())

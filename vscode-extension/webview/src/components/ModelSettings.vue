@@ -26,8 +26,38 @@
         <section class="settings-section">
           <div class="section-title">
             <h3>模型（[[models]]）</h3>
-            <vscode-button appearance="secondary" @click="addModel">＋</vscode-button>
+            <vscode-button appearance="secondary" @click="addModel">＋ 手动</vscode-button>
           </div>
+
+          <!-- Quick add: pick a built-in provider + model, then just enter the key. -->
+          <div class="quick-add" v-if="store.builtinCatalog?.providers?.length">
+            <div class="quick-add-title">快速添加（内置模型）</div>
+            <div class="row">
+              <label>
+                提供方
+                <select v-model="pickedProvider">
+                  <option v-for="p in store.builtinCatalog.providers" :key="p.provider" :value="p.provider">
+                    {{ p.provider }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                模型
+                <select v-model="pickedModelId" :disabled="!currentProviderModels.length">
+                  <option v-for="bm in currentProviderModels" :key="bm.model_id" :value="bm.model_id">
+                    {{ bm.label }} ({{ bm.model_id }})
+                  </option>
+                </select>
+              </label>
+              <vscode-button appearance="secondary" @click="addBuiltinModel" :disabled="!pickedModelId">＋</vscode-button>
+            </div>
+            <p class="hint">
+              只填 API Key 即可使用：
+              <code>{{ currentProviderKeyEnv || '{PROVIDER}_API_KEY' }}</code>
+              环境变量 / 下方内联。端点与默认参数已内置。
+            </p>
+          </div>
+
           <div v-for="(m, i) in draft.models" :key="i" class="card">
             <div class="card-head">
               <strong>{{ m.name || '(未命名)' }}</strong>
@@ -42,17 +72,23 @@
                 提供方
                 <select v-model="m.provider">
                   <option value="deepseek">deepseek</option>
+                  <option value="deepseek-responses">deepseek-responses</option>
+                  <option value="openai">openai</option>
+                  <option value="anthropic">anthropic</option>
+                  <option value="local">local</option>
                   <option value="openai_compatible">openai_compatible</option>
                 </select>
               </label>
-              <label v-if="m.provider === 'openai_compatible'">URL <input v-model="m.endpoint" placeholder="https://your-gateway.example.com/v1" /></label>
-              <label v-else class="fixed">
-                端点（固化）
-                <input value="https://api.deepseek.com" disabled />
+              <label>
+                URL（覆盖预设端点）
+                <input v-model="m.endpoint" :placeholder="endpointPlaceholder(m.provider)" />
               </label>
             </div>
             <div class="row">
-              <label class="wide">API Key <input v-model="m.api_key" placeholder="留空则用 {PROVIDER}_API_KEY 环境变量" /></label>
+              <label class="wide">
+                API Key
+                <input v-model="m.api_key" :placeholder="`留空则用 ${keyEnvFor(m.provider)} 环境变量`" />
+              </label>
             </div>
             <div class="row">
               <label>思考模式 <input v-model="m.thinking" placeholder="high" /></label>
@@ -60,6 +96,7 @@
             </div>
             <div class="row">
               <label>temperature <input v-model.number="m.temperature" type="number" step="0.1" /></label>
+              <label>top_p <input v-model.number="m.top_p" type="number" step="0.05" /></label>
               <label>max_tokens <input v-model.number="m.max_tokens" type="number" /></label>
             </div>
           </div>
@@ -70,7 +107,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue';
+import { reactive, ref, computed, watch } from 'vue';
 import { useChatStore } from '../stores/chat';
 import type { ConfigView, ConfigModel } from '../protocol';
 
@@ -101,9 +138,75 @@ watch(
   { immediate: true, deep: true }
 );
 
+/** Provider → default endpoint placeholder (mirrors the built-in presets). */
+const PROVIDER_ENDPOINTS: Record<string, string> = {
+  deepseek: 'https://api.deepseek.com',
+  'deepseek-responses': 'https://api.deepseek.com',
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com',
+  local: 'http://127.0.0.1:8080/v1',
+  openai_compatible: 'https://api.openai.com/v1',
+};
+const PROVIDER_KEY_ENV: Record<string, string> = {
+  deepseek: 'DEEPSEEK_API_KEY',
+  'deepseek-responses': 'DEEPSEEK_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  anthropic: 'ANTHROPIC_API_KEY',
+  local: 'OPENAI_API_KEY',
+  openai_compatible: 'OPENAI_API_KEY',
+};
+
+function endpointPlaceholder(provider: string): string {
+  return PROVIDER_ENDPOINTS[provider] ?? 'https://your-gateway.example.com/v1';
+}
+function keyEnvFor(provider: string): string {
+  return PROVIDER_KEY_ENV[provider] ?? '{PROVIDER}_API_KEY';
+}
+
 function addModel() {
   draft.models.push({ name: '', model_id: '', provider: 'deepseek' } as ConfigModel);
 }
+
+/** Quick-add from the built-in catalog: pick provider → model → just enter key. */
+const pickedProvider = ref('deepseek');
+const pickedModelId = ref('');
+const currentProviderModels = computed(() =>
+  store.builtinCatalog?.providers.find((p) => p.provider === pickedProvider.value)?.models ?? []
+);
+const currentProviderKeyEnv = computed(
+  () => store.builtinCatalog?.providers.find((p) => p.provider === pickedProvider.value)?.key_env ?? keyEnvFor(pickedProvider.value)
+);
+// Default the picked model to the first offered one when the provider changes.
+watch(pickedProvider, () => {
+  pickedModelId.value = currentProviderModels.value[0]?.model_id ?? '';
+});
+// Seed the initial pick from the catalog once it arrives.
+watch(
+  () => store.builtinCatalog,
+  (cat) => {
+    if (cat?.providers?.length && !pickedModelId.value) {
+      pickedProvider.value = cat.providers[0].provider;
+      pickedModelId.value = cat.providers[0].models[0]?.model_id ?? '';
+    }
+  },
+  { immediate: true }
+);
+
+function addBuiltinModel() {
+  if (!pickedModelId.value) return;
+  const bm = currentProviderModels.value.find((x) => x.model_id === pickedModelId.value);
+  if (!bm) return;
+  const provider = pickedProvider.value;
+  draft.models.push({
+    name: bm.model_id,
+    model_id: bm.model_id,
+    provider,
+    thinking: bm.thinking ?? undefined,
+    reasoning_effort: bm.reasoning_effort ?? undefined,
+    api_key: '',
+  } as ConfigModel);
+}
+
 function removeModel(i: number) {
   draft.models.splice(i, 1);
 }
@@ -234,5 +337,24 @@ select {
   opacity: 0.6;
   margin: 4px 0 0;
   word-break: break-all;
+}
+.quick-add {
+  border: 1px dashed var(--vscode-panel-border, #444);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 10px;
+  background: rgba(0, 120, 212, 0.06);
+}
+.quick-add-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  opacity: 0.8;
+  margin-bottom: 4px;
+}
+.quick-add code {
+  background: rgba(127, 127, 127, 0.18);
+  padding: 0 4px;
+  border-radius: 3px;
 }
 </style>

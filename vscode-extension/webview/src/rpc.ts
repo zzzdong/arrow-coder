@@ -37,26 +37,32 @@ class RpcClient {
   /**
    * Send a request and await the host's response (matched by id).
    *
-   * NOTE: the Rust host replies to most requests with a JSON-RPC *notification*
-   * (no `id`) rather than a response, so `await` would hang forever. To keep
-   * callers responsive we reject after `timeoutMs` (default 5s). Callers that
-   * must not block on a reply (e.g. undo / restoreFile) should treat rejection
-   * as "the request was sent" and optimistically update local state.
+   * The Rust host replies to EVERY request that carries an `id` with a real
+   * JSON-RPC response — `result` on success (often `null` for fire-and-forget
+   * or streaming commands that answer "accepted"), or `error` (e.g. `unknown
+   * method`). So `request()` can await directly instead of relying on a
+   * side-channel notification. Streaming output (chat text, tool calls, …) still
+   * arrives via `onNotification`; this only resolves the request's
+   * accepted/error outcome. `timeoutMs` (default 0 = no timeout) is only a long
+   * safety net against a hung host.
    */
   request<T = unknown>(
     method: string,
     params?: unknown,
-    timeoutMs = 5000
+    timeoutMs = 0
   ): Promise<T> {
     const id = this.nextId++;
     const req: JsonRpcRequest = { jsonrpc: '2.0', id, method, params };
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`timeout waiting for response to "${method}"`));
-      }, timeoutMs);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`timeout waiting for response to "${method}"`));
+        }, timeoutMs);
+      }
       this.pending.set(id, (resp) => {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         if (resp.error) {
           reject(new Error(resp.error.message));
         } else {

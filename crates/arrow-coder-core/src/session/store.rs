@@ -5,7 +5,7 @@
 //! never stored as a mutable array. This enables audit, replay and crash recovery.
 
 use crate::core::{ArrowError, LLMMessage, Result, Role, ToolCall, ToolExecId};
-use crate::session::event::{parse_event, SessionEvent, SESSION_FORMAT_VERSION};
+use crate::session::event::{SequencedEvent, SessionEvent, SESSION_FORMAT_VERSION};
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -29,6 +29,16 @@ impl SessionStore {
     pub fn new() -> Self {
         Self {
             events: Vec::new(),
+            file: None,
+        }
+    }
+
+    /// Build a store from an already-loaded event slice (no on-disk binding).
+    /// Used by the query layer to project a sub-window of a session's log
+    /// without re-reading the file.
+    pub fn from_events(events: Vec<SessionEvent>) -> Self {
+        Self {
+            events,
             file: None,
         }
     }
@@ -221,7 +231,10 @@ impl SessionStore {
             match &self.events[i] {
                 SessionEvent::Unknown { .. }
                 | SessionEvent::TodoWrite { .. }
-                | SessionEvent::Command { .. } => continue,
+                | SessionEvent::TurnStats { .. }
+                | SessionEvent::Command { .. }
+                | SessionEvent::TurnStart { .. }
+                | SessionEvent::TurnEnd { .. } => continue,
                 ev => items.push(ev_to_message(ev)),
             }
         }
@@ -614,6 +627,9 @@ impl SessionStore {
                     });
                 }
                 SessionEvent::Unknown { .. } => { /* opaque; skip */ }
+                // Turn boundaries are metadata; the per-turn UI separation is
+                // already conveyed by `TurnStats` above, so skip them here.
+                SessionEvent::TurnStart { .. } | SessionEvent::TurnEnd { .. } => { /* skip */ }
             }
         }
         flush_assistant(&mut out, &mut acc);
@@ -697,14 +713,19 @@ fn ev_to_message(ev: &SessionEvent) -> LLMMessage {
             LLMMessage::tool(content, id.to_string(), name.clone())
         }
         SessionEvent::Compaction { summary, .. } => LLMMessage::system(summary),
-        // Todo snapshots are projected separately via `derive_todos`; they do
-        // not contribute a chat message (mirrors harness's todo/write events).
-        SessionEvent::TodoWrite { .. } => LLMMessage::user(""),
-        // Turn stats are projected into the UI transcript, not the LLM context.
-        SessionEvent::TurnStats { .. } => LLMMessage::user(""),
-        // Commands are recorded (auditable) but not fed back to the LLM.
-        SessionEvent::Command { .. } => LLMMessage::user(""),
-        SessionEvent::Unknown { .. } => LLMMessage::user(""),
+        // The following variants are log-only metadata, never surface messages.
+        // `derive_messages` already skips them, so reaching this arm means a
+        // caller tried to project them directly — which is a bug. They have
+        // dedicated projectors instead: `derive_todos` (todo), UI transcript
+        // (turn stats / turn boundaries / commands), audit (unknown).
+        SessionEvent::TodoWrite { .. }
+        | SessionEvent::TurnStats { .. }
+        | SessionEvent::TurnStart { .. }
+        | SessionEvent::TurnEnd { .. }
+        | SessionEvent::Command { .. }
+        | SessionEvent::Unknown { .. } => {
+            unreachable!("log-only event must not be projected as an LLM message")
+        }
     }
 }
 
@@ -740,12 +761,43 @@ fn read_events_file(path: &Path) -> Result<Vec<SessionEvent>> {
             continue; // header line is not an event
         }
 
-        events.push(parse_event(&json));
+        // Parse into a SequencedEvent (carries `seq` = log position). serde
+        // ignores the unknown `seq` key if absent, defaulting it to 0.
+        let mut seq_ev: SequencedEvent = serde_json::from_value(json.clone()).map_err(|e| {
+            ArrowError::Session(format!(
+                "Invalid event JSON at {}:{}: {e}",
+                path.display(),
+                line_no + 1
+            ))
+        })?;
+
+        // harness invariant: seq === log position (events.len() before push).
+        // Only enforce when the source actually carried a `seq` key, so legacy
+        // logs (no seq) load by position without spurious corruption warnings.
+        let expected_seq = events.len() as u64;
+        let has_seq = json.get("seq").is_some();
+        if has_seq && seq_ev.seq != expected_seq {
+            tracing::warn!(
+                target: "session_store",
+                "event seq discontinuity at {}:{}: got {}, expected {} (normalized to position)",
+                path.display(),
+                line_no + 1,
+                seq_ev.seq,
+                expected_seq
+            );
+            // Normalize: enforce the harness contract in-memory (position is the
+            // source of truth). A strict reject (harness "corrupt session log")
+            // is deferred until legacy logs are migrated (see P3 notes).
+            seq_ev.seq = expected_seq;
+        }
+        events.push(seq_ev.event);
     }
     Ok(events)
 }
 
-/// Write all events as JSON-lines, prefixed by a version header.
+/// Write all events as JSON-lines, prefixed by a version header. Each event is
+/// wrapped in a `SequencedEvent` carrying `seq` = its 0-based position in the
+/// log (mirrors deepseek-harness `seq = log.length`; immutable after write).
 fn write_events_file(path: &Path, events: &[SessionEvent]) -> Result<()> {
     let mut out = OpenOptions::new()
         .create(true)
@@ -753,8 +805,12 @@ fn write_events_file(path: &Path, events: &[SessionEvent]) -> Result<()> {
         .truncate(true)
         .open(path)?;
     writeln!(out, "{}", serde_json::json!({"format_version": SESSION_FORMAT_VERSION}))?;
-    for ev in events {
-        writeln!(out, "{}", serde_json::to_string(ev)?)?;
+    for (seq, ev) in events.iter().enumerate() {
+        let seq_ev = SequencedEvent {
+            event: ev.clone(),
+            seq: seq as u64,
+        };
+        writeln!(out, "{}", serde_json::to_string(&seq_ev)?)?;
     }
     out.flush()?;
     Ok(())
