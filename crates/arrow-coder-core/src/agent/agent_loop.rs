@@ -3395,6 +3395,8 @@ mod tests {
             max_tokens: None,
             auto_compact_threshold: None,
             top_p: None,
+            top_k: None,
+            presence_penalty: None,
         };
         let mut a = agent().with_model(model).with_tools(vec![Arc::new(EchoTool)]);
 

@@ -1473,6 +1473,8 @@ mod tests {
             max_tokens: None,
             auto_compact_threshold: None,
             top_p: None,
+            top_k: None,
+            presence_penalty: None,
         }
     }
 

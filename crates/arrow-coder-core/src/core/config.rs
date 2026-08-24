@@ -335,6 +335,12 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     /// Nucleus sampling `top_p`. Overrides the provider preset's default when set.
     pub top_p: Option<f64>,
+    /// Vocabulary truncation `top_k`. When set, only the top-k most likely tokens
+    /// are considered at each step. Overrides the provider preset's default when set.
+    pub top_k: Option<u32>,
+    /// Presence penalty. Positive values discourage repeating the same tokens by
+    /// penalizing tokens already present in the text; negative values encourage it.
+    pub presence_penalty: Option<f64>,
     /// Auto-compact context threshold.
     pub auto_compact_threshold: Option<u64>,
 }
@@ -788,6 +794,8 @@ impl VibeConfig {
                 max_tokens: Some(64000),
                 auto_compact_threshold: Some(64000),
                 top_p: None,
+                top_k: None,
+                presence_penalty: None,
             },
             ModelConfig {
                 name: "deepseek-pro".to_string(),
@@ -801,6 +809,8 @@ impl VibeConfig {
                 max_tokens: Some(64000),
                 auto_compact_threshold: Some(64000),
                 top_p: None,
+                top_k: None,
+                presence_penalty: None,
             },
             ModelConfig {
                 name: "gpt4o".to_string(),
@@ -814,6 +824,8 @@ impl VibeConfig {
                 max_tokens: Some(8192),
                 auto_compact_threshold: Some(16000),
                 top_p: None,
+                top_k: None,
+                presence_penalty: None,
             },
             ModelConfig {
                 name: "local".to_string(),
@@ -827,6 +839,8 @@ impl VibeConfig {
                 max_tokens: Some(4096),
                 auto_compact_threshold: Some(8000),
                 top_p: None,
+                top_k: None,
+                presence_penalty: None,
             },
         ];
 

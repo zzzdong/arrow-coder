@@ -21,6 +21,10 @@ struct OpenAIRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presence_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
@@ -446,6 +450,8 @@ impl OpenAIBackend {
             messages: self.convert_messages(messages),
             temperature,
             top_p: model.effective_top_p(),
+            top_k: model.top_k,
+            presence_penalty: model.presence_penalty,
             tools: tools.map(|t| self.convert_tools(t)),
             tool_choice: self.convert_tool_choice(tool_choice.as_ref()),
             max_tokens,
