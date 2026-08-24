@@ -106,24 +106,29 @@ function handleNotification(n: JsonRpcNotification) {
       break;
     case 'ui/injectReference': {
       // Right-click "Add to Arrow Coder Chat" from the editor/explorer.
+      // Push a structured reference block so the core expands it IN PLACE
+      // (preserving its position relative to any typed text), instead of
+      // flattening everything to a string.
       const params = n.params as {
         kind: 'path' | 'selection';
         path: string;
+        isDir?: boolean;
         startLine?: number;
         endLine?: number;
         snippet?: string;
       };
-      let addition: string;
-      if (params.kind === 'selection' && params.snippet) {
-        // Inline the selected lines (core expands `@path` files but not line
-        // ranges, so we embed the snippet directly — same shape it would render).
-        addition = `<referenced lines: ${params.path}:${params.startLine}-${params.endLine}>\n${params.snippet}`;
+      if (params.kind === 'selection' && params.snippet && params.startLine && params.endLine) {
+        store.pushReference({
+          kind: 'selection',
+          path: params.path,
+          range: { start: params.startLine, end: params.endLine },
+          snippet: params.snippet,
+        });
+      } else if (params.isDir) {
+        store.pushReference({ kind: 'dir', path: params.path, depth: 2 });
       } else {
-        // Whole file / folder → `@path` reference expanded by the core.
-        addition = `@${params.path}`;
+        store.pushReference({ kind: 'file', path: params.path });
       }
-      const draft = store.draft;
-      store.draft = draft.length === 0 ? addition : `${draft}\n${addition}`;
       break;
     }
   }

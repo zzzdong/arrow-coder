@@ -58,10 +58,42 @@ export interface CreateParams {
   fresh?: boolean;
 }
 
+/** A 1-based inclusive line range within a referenced file. */
+export interface RefRange {
+  start: number;
+  end: number;
+}
+
+/** Semantic kind of a reference. */
+export type RefKind = 'file' | 'dir' | 'selection' | 'image';
+
+/** A single block of a structured user document. */
+export type DocBlock =
+  | { type: 'text'; text: string }
+  | {
+      type: 'ref';
+      kind: RefKind;
+      path: string;
+      range?: RefRange;
+      snippet?: string;
+      depth?: number;
+    };
+
+/** A structured, position-aware user document (mirrors `core::UserDoc`). */
+export interface UserDoc {
+  blocks: DocBlock[];
+}
+
 /** Structured `session/prompt` input (mirrors `core::UserInput`). */
 export interface PromptParams {
   input:
-    | { type: 'message'; content: string; references?: string[] }
+    | {
+        type: 'message';
+        content: string;
+        references?: string[];
+        /** Structured document; takes precedence over content + references. */
+        doc?: UserDoc;
+      }
     | { type: 'command'; name: string; args?: string[] };
 }
 

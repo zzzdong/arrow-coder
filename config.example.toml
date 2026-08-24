@@ -64,6 +64,32 @@ context_warnings = true
 # thinking = "high"
 # reasoning_effort = "high"
 #
+# --- Standalone model.toml ---
+# Models can also be defined in a dedicated `model.toml` file (either
+# `~/.arrowcode/model.toml` (user) or `.arrowcode/model.toml` (project, takes
+# precedence)). A model may be fully self-contained and point at any
+# OpenAI-compatible endpoint without a separate [[providers]] entry. The
+# openai-compatible backend is the default.
+#
+# [[model]]
+# name = "qwen3.8"
+# model_id = "qwen3.5"            # wire model id sent to the API (defaults to `name`)
+# endpoint = "https://localhost:8000/v1/chat/completions"
+# api_key = "xxx"
+# verify_tls = false              # disable TLS verification for self-signed certs
+# headers = { cookie = "xxxxxxxxxxxxxxxxx" }   # extra HTTP headers on every request
+# alias = "qwen3"
+# temperature = 0.2               # sampling temperature (default 0.2)
+# top_p = 0.95                    # nucleus sampling threshold (optional)
+# top_k = 20                      # top-K sampling (optional)
+# presence_penalty = 0.0          # repeat penalty (optional)
+# max_tokens = 8192               # max completion tokens (auto-clamped to remaining context window)
+# context_window = 131072         # model context window in tokens (default 128k); MUST be <= the serving backend's limit
+#                                 # (e.g. vLLM --max-model-len). Drives auto-compaction AND the max_tokens safety clamp that
+#                                 # prevents the backend from cutting the connection on overflow.
+# auto_compact_threshold = 100000 # compact when session reaches this many tokens (default: 80% of context_window)
+# thinking = "high"               # optional extended-thinking mode
+#
 # [[models]]
 # name = "local"
 # model_id = "local"

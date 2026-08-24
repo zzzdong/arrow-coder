@@ -1,11 +1,9 @@
 //! LLM backend module
 
-pub mod anthropic;
 pub mod backend;
 pub mod deepseek;
 pub mod openai;
 
-pub use anthropic::AnthropicBackend;
 pub use backend::BackendLike;
 pub use openai::OpenAIBackend;
 pub use crate::core::config::{ModelConfig, ProviderConfig};
@@ -27,10 +25,6 @@ pub fn init_backend(
     match kind {
         "openai" | "openai-compatible" => {
             let backend = openai::OpenAIBackend::new(provider_config.clone())?;
-            Ok(Arc::new(backend))
-        }
-        "anthropic" => {
-            let backend = anthropic::AnthropicBackend::new(provider_config.clone())?;
             Ok(Arc::new(backend))
         }
         "deepseek" => {

@@ -171,11 +171,24 @@ pub struct LLMChunk {
     /// truncated by `max_tokens` and the caller should compact/continue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    /// Set by the backend when the upstream stream was cut before producing a
+    /// clean terminator (e.g. a reverse proxy idle-timeout that FINs mid-stream,
+    /// or a serving backend that overflows its batched-token budget and drops
+    /// the connection). This is distinct from `finish_reason == "length"`
+    /// (which the model itself signals) — here the transport was interrupted
+    /// and the accumulated content/reasoning may be incomplete. The agent loop
+    /// uses this to trigger a business-level retry.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stream_interrupted: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl LLMChunk {
     pub fn new(message: LLMMessage, usage: Option<LLMUsage>) -> Self {
-        Self { message, usage, correlation_id: None, finish_reason: None }
+        Self { message, usage, correlation_id: None, finish_reason: None, stream_interrupted: false }
     }
 
     /// Build a chunk carrying a terminal `finish_reason` (e.g. `length`).
@@ -189,6 +202,20 @@ impl LLMChunk {
             usage,
             correlation_id: None,
             finish_reason: Some(finish_reason.into()),
+            stream_interrupted: false,
+        }
+    }
+
+    /// Build a chunk that marks the stream as having been interrupted (used as
+    /// a terminal sentinel by backends when the upstream connection is cut
+    /// mid-stream). Carries no real content.
+    pub fn interrupted() -> Self {
+        Self {
+            message: LLMMessage::assistant(String::new()),
+            usage: None,
+            correlation_id: None,
+            finish_reason: Some("stream_interrupted".to_string()),
+            stream_interrupted: true,
         }
     }
 }
@@ -203,6 +230,8 @@ pub enum UserInput {
     Message {
         content: String,
         /// File or directory paths referenced via `@`. The core reads them.
+        /// Retained for backward compatibility (CLI / legacy hosts); new hosts
+        /// should prefer `doc` for structured, position-aware references.
         #[serde(default)]
         references: Vec<String>,
     },

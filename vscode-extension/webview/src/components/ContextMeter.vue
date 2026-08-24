@@ -171,11 +171,16 @@ onBeforeUnmount(() => {
 }
 
 .ctx-pop {
+  /* Anchor to the meter (which sits in the input bar's bottom-left) and pop
+     UPWARD so the panel height never grows and no scrollbar appears. */
   position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
+  left: 0;
+  bottom: calc(100% + 6px);
   z-index: 20;
   min-width: 180px;
+  max-width: calc(100vw - 12px);
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
   background: var(--bg-panel, #252526);
   border: 1px solid var(--border);
   border-radius: 6px;
