@@ -55,7 +55,9 @@ pub struct ModelSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
     pub default_agent: String,
-    pub default_model: Option<String>,
+    /// 当前 session 激活的模型别名（若该 session 尚未选择则为 `None`）。
+    /// 注意：这是**运行时/session 级**状态，不再持久化为全局配置字段。
+    pub active_model: Option<String>,
 }
 
 /// 配置仓库接缝。所有配置读写都经此 trait。
@@ -63,6 +65,14 @@ pub trait ConfigRepository: Send + Sync {
     /// 按 alias 解析出完整 `ModelConfig`。找不到即报错（不静默回退），
     /// 对应 harness schema 校验——错误的 alias 是调用方的 bug，不应吞掉。
     fn resolve_model(&self, alias: &str) -> Result<crate::core::config::ModelConfig>;
+
+    /// 解析当前激活模型（取 `active_model` 别名再 resolve）。
+    ///
+    /// 返回 `Option`：**未配置激活模型时返回 `None` 而非报错**——配置加载是
+    /// core 的职责，无配置属于正常态（CLI/TUI 应可启动、进入"待配置"状态，
+    /// 仅在真正发请求时才要求模型）。调用方（CLI / vscode server）统一经此
+    /// 方法取激活模型，避免各自重写"取 alias → resolve"的重复逻辑。
+    fn resolve_active_model(&self) -> Result<Option<crate::core::config::ModelConfig>>;
 
     /// 列出全部可用模型（轻量摘要，供 UI 派生下拉）。
     fn list_models(&self) -> Result<Vec<ModelSummary>>;
@@ -72,9 +82,6 @@ pub trait ConfigRepository: Send + Sync {
 
     /// 写入 `Model` 域：替换整个模型注册表并持久化，随后广播变更。
     fn set_models(&self, models: Vec<crate::core::config::ModelConfig>) -> Result<()>;
-
-    /// 写入 `Agent` 域：更新激活模型并持久化，随后广播变更。
-    fn set_active_model(&self, alias: Option<&str>) -> Result<()>;
 
     /// 订阅配置变更（对应 harness `DomainChanged`）。
     fn watch(&self) -> broadcast::Receiver<ConfigChange>;
@@ -156,6 +163,13 @@ impl ConfigRepository for LocalConfigRepository {
             .ok_or_else(|| ArrowError::Config(format!("unknown model alias: {}", alias)))
     }
 
+    fn resolve_active_model(&self) -> Result<Option<crate::core::config::ModelConfig>> {
+        match self.current_agent_config()?.active_model {
+            Some(alias) => Ok(Some(self.resolve_model(&alias)?)),
+            None => Ok(None),
+        }
+    }
+
     fn list_models(&self) -> Result<Vec<ModelSummary>> {
         let cfg = self.inner.lock().unwrap();
         Ok(cfg
@@ -173,7 +187,10 @@ impl ConfigRepository for LocalConfigRepository {
         let cfg = self.inner.lock().unwrap();
         Ok(AgentConfig {
             default_agent: cfg.default_agent.clone(),
-            default_model: cfg.active_model.clone(),
+            // 注意：全局 `active_model` 字段已移除，session 当前模型由 host
+            // 在运行时经 `pending_model` / `session/reconfigure` 维护，
+            // 此处 `current_agent_config()` 只投影 `default_agent`。
+            active_model: None,
         })
     }
 
@@ -187,20 +204,6 @@ impl ConfigRepository for LocalConfigRepository {
             .change_tx
             .send(ConfigChange {
                 domain: ConfigDomain::Model,
-            });
-        Ok(())
-    }
-
-    fn set_active_model(&self, alias: Option<&str>) -> Result<()> {
-        {
-            let mut cfg = self.inner.lock().unwrap();
-            cfg.active_model = alias.map(|s| s.to_string());
-            cfg.save_split(&self.config_path, self.models_path.as_ref())?;
-        }
-        let _ = self
-            .change_tx
-            .send(ConfigChange {
-                domain: ConfigDomain::Agent,
             });
         Ok(())
     }
@@ -226,17 +229,26 @@ mod tests {
         let repo = test_repo();
         let models = repo.list_models().unwrap();
         assert!(!models.is_empty(), "default config should expose models");
+        // 全局 active_model 已移除：current_agent_config 只投影 default_agent，
+        // 激活模型改由 session 级 `session/reconfigure` 维护，此处不再断言。
         let agent = repo.current_agent_config().unwrap();
-        if let Some(active) = agent.default_model {
-            let m = repo.resolve_model(&active).unwrap();
-            assert_eq!(m.name, active);
-        }
+        assert!(agent.active_model.is_none());
     }
 
     #[test]
     fn resolve_unknown_errors() {
         let repo = test_repo();
         assert!(repo.resolve_model("__no_such_model__").is_err());
+    }
+
+    #[test]
+    fn resolve_active_none_when_unconfigured() {
+        // 全局 active_model 已移除，core 不再持有"当前激活模型"语义；
+        // session 模型由 host 运行时维护，此处仅确认投影稳定返回 None。
+        let cfg = VibeConfig::default();
+        let repo = LocalConfigRepository::new(cfg, PathBuf::from("config.toml"), None);
+        assert!(repo.current_agent_config().unwrap().active_model.is_none());
+        assert!(repo.resolve_active_model().unwrap().is_none());
     }
 
     #[test]
@@ -253,18 +265,5 @@ mod tests {
         // watch 应收到 Model 域变更
         let change = rx.try_recv().expect("should receive change");
         assert_eq!(change.domain, ConfigDomain::Model);
-    }
-
-    #[test]
-    fn set_active_model_broadcasts_and_updates() {
-        let repo = test_repo();
-        let mut rx = repo.watch();
-        repo.set_active_model(Some("m_test")).unwrap();
-        assert_eq!(
-            repo.current_agent_config().unwrap().default_model,
-            Some("m_test".to_string())
-        );
-        let change = rx.try_recv().expect("should receive change");
-        assert_eq!(change.domain, ConfigDomain::Agent);
     }
 }

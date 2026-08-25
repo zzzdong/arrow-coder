@@ -87,7 +87,7 @@ pub struct App {
     pub config: VibeConfig,
     /// Show help overlay
     pub show_help: bool,
-    /// Current model name
+    /// Current model name (display only; real check is per-session on the loop)
     pub current_model: String,
     /// Status message
     pub status_message: Option<String>,
@@ -155,10 +155,10 @@ impl App {
     ///
     /// Note: AgentLoop should be set via `with_agent_loop()` before running
     pub fn new(config: VibeConfig) -> Self {
-        let current_model = config
-            .active_model
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
+        // 模型选择完全由 session 级维护（创建/切换时选定），无全局激活模型。
+        // 启动时 `current_model` 仅作展示占位，真实"是否已选模型"在发送前
+        // 经 `agent_loop.model()` 检查，避免依赖已移除的全局 active_model。
+        let current_model = "default".to_string();
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (perm_tx, perm_rx) = mpsc::unbounded_channel();
@@ -521,6 +521,8 @@ impl App {
             return Some(content);
         }
 
+        // 无模型时的"是否可发送"检查放在 send_to_agent 内（需读 agent loop），
+        // 此处仅做常规提交。
         self.add_user_message(content.clone());
         self.send_to_agent(content.clone());
 
@@ -544,6 +546,16 @@ impl App {
             // Spawn agent task with streaming
             let handle = tokio::spawn(async move {
                 let mut agent = agent_loop.lock().await;
+
+                // 发送前校验：session 必须已选择模型（全局 active_model 已移除）。
+                // 无模型时给友好提示，不调用 LLM，避免崩溃。
+                if agent.model().is_none() {
+                    let _ = tx.send(AgentEvent::Error(
+                        "No model selected for this session. Choose a model from the selector before sending."
+                            .to_string(),
+                    ));
+                    return;
+                }
 
                 // Use act_streaming for real-time response
                 let tx_chunk = tx.clone();

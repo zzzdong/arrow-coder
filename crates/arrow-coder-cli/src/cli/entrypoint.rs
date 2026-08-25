@@ -157,20 +157,9 @@ fn build_config_repo(args: &CliArgs) -> LocalConfigRepository {
     }
 }
 
-/// 解析当前激活模型：经 `ConfigRepository` 取 active 别名再 resolve。
-/// 取代原 `VibeConfig::get_active_model()` 的重复解析路径，统一入口。
-fn resolve_active_model(repo: &LocalConfigRepository) -> Result<arrow_coder_core::core::config::ModelConfig> {
-    let alias = repo
-        .current_agent_config()?
-        .default_model
-        .ok_or_else(|| {
-            ArrowError::Config(
-                "No active model configured. Please set 'active_model' in your config file."
-                    .to_string(),
-            )
-        })?;
-    repo.resolve_model(&alias)
-}
+/// 无模型时的友好提示（模型选择完全由 session 级维护，无全局默认）。
+const NO_MODEL_HINT: &str =
+    "No model selected for this session. Choose a model before sending (e.g. via `session/reconfigure` or the selector).";
 
 /// Show current configuration
 async fn show_config(repo: &LocalConfigRepository) -> Result<()> {
@@ -182,7 +171,7 @@ async fn show_config(repo: &LocalConfigRepository) -> Result<()> {
 
     println!("Current Configuration:");
     println!("  ArrowCode Home: {}", arrowcode_home);
-    println!("  Active Model: {:?}", config.active_model);
+    println!("  Active Model: per-session (selected via the model selector; no global default)");
     println!("  Default Agent: {}", config.default_agent);
     println!("\nModels:");
     // 经 repo 投影模型列表（轻量摘要，不含密钥）。
@@ -205,7 +194,7 @@ async fn list_models(repo: &LocalConfigRepository) -> Result<()> {
     let agent = repo.current_agent_config()?;
     println!("Available Models:");
     for m in repo.list_models()? {
-        let marker = if Some(&m.name) == agent.default_model.as_ref() {
+        let marker = if Some(&m.name) == agent.active_model.as_ref() {
             "*"
         } else {
             " "
@@ -231,27 +220,48 @@ async fn run_programmatic_mode(
         .effective_prompt()
         .ok_or_else(|| arrow_coder_core::core::ArrowError::Config("No prompt provided".to_string()))?;
 
-    // Get model configuration — 经 repo 解析激活模型（消除 get_active_model 重复逻辑）。
-    let model_config = resolve_active_model(repo)?;
+    // 解析本 session 的模型：优先 `--model`，否则取 session 已选模型
+    // （全局 active_model 已移除，模型选择完全 per-session）。
+    let model_alias = args
+        .model
+        .clone()
+        .or_else(|| repo.resolve_active_model().ok().flatten().map(|m| m.name));
+    let model_config = match model_alias {
+        Some(name) => Some(repo.resolve_model(&name)?),
+        None => None,
+    };
 
     // Resolve the runtime backend config: model -> endpoint -> provider family.
-    let provider_config = config.resolve_provider(&model_config)?;
-
-    // Initialize backend
-    let backend = arrow_coder_core::llm::init_backend(&provider_config)?;
+    let (_provider_config, backend) = match &model_config {
+        Some(mc) => {
+            let pc = config.resolve_provider(mc)?;
+            let be = arrow_coder_core::llm::init_backend(&pc)?;
+            (Some(pc), Some(be))
+        }
+        None => (None, None),
+    };
 
     // Create a session for this run
     let mut session_manager = session_manager;
     let _session_id = session_manager.create_session();
 
-    // Create agent loop
+    // Create agent loop（模型缺失时仍构建，待发送请求前再提示，启动不报错）。
     let mut agent_loop = arrow_coder_core::agent::AgentLoop::new(arrow_coder_core::agent::AgentLoopConfig {
         max_turns: args.max_turns.or(Some(10)),
         max_price: args.max_price,
-        max_session_tokens: args.max_tokens.or(model_config.effective_max_tokens().map(|t| t as u64)),
-        auto_compact_threshold: model_config.auto_compact_threshold,
-    })
-    .with_model(model_config.clone());
+        max_session_tokens: model_config
+            .as_ref()
+            .and_then(|m| args.max_tokens.or(m.effective_max_tokens().map(|t| t as u64))),
+        auto_compact_threshold: model_config
+            .as_ref()
+            .and_then(|m| m.auto_compact_threshold),
+    });
+    if let Some(mc) = &model_config {
+        agent_loop = agent_loop.with_model(mc.clone());
+    }
+    if let Some(be) = &backend {
+        agent_loop = agent_loop.with_backend(be.clone());
+    }
 
     // Attach session logger so the conversation is persisted
     if let Some(logger) = session_manager.logger() {
@@ -284,14 +294,18 @@ async fn run_programmatic_mode(
 
     // Create a configured task tool that can spawn sub-agents.
     let task_graph = std::sync::Arc::new(std::sync::Mutex::new(arrow_coder_core::core::TaskGraph::new()));
-    let task_tool = arrow_coder_core::tools::builtins::task::TaskTool::new()
-        .with_backend(backend.clone())
-        .with_model(model_config.clone())
+    let mut task_tool = arrow_coder_core::tools::builtins::task::TaskTool::new()
         .with_tools(base_tools.clone())
         .with_working_dir(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
         .with_session_dir(session_manager.logger().and_then(|l| l.session_dir().map(|p| p.to_path_buf())))
         .with_skill_manager(skill_manager.clone())
         .with_task_graph(task_graph);
+    if let Some(be) = &backend {
+        task_tool = task_tool.with_backend(be.clone());
+    }
+    if let Some(mc) = &model_config {
+        task_tool = task_tool.with_model(mc.clone());
+    }
 
     // Create the skill tool with access to the skill manager.
     let skill_tool = arrow_coder_core::tools::builtins::skill::SkillTool::with_manager(skill_manager.clone());
@@ -325,7 +339,16 @@ async fn run_programmatic_mode(
         }
     }
 
-    let events = agent_loop.act_multi(backend.as_ref(), tools, prompt.to_string()).await
+    // 真正发请求前才要求模型已配置：无模型时给出友好提示而非崩溃。
+    let backend_ref = match backend.as_ref() {
+        Some(b) => b,
+        None => {
+            eprintln!("{}", NO_MODEL_HINT);
+            return Ok(());
+        }
+    };
+
+    let events = agent_loop.act_multi(&**backend_ref, tools, prompt.to_string()).await
         .map_err(|e| arrow_coder_core::core::ArrowError::AgentLoop(e))?;
 
     // Output based on format
@@ -380,14 +403,27 @@ async fn run_interactive_mode(
     _command_registry: CommandRegistry,
     skill_manager: SkillManager,
 ) -> Result<()> {
-    // Get model configuration — 经 repo 解析激活模型（消除 get_active_model 重复逻辑）。
-    let model_config = resolve_active_model(repo)?;
+    // 解析本 session 的模型：优先 `--model`，否则取 session 已选模型
+    // （全局 active_model 已移除，模型选择完全 per-session；交互模式允许
+    // 无模型启动，进入"待配置"状态，发请求前再提示）。
+    let model_alias = args
+        .model
+        .clone()
+        .or_else(|| repo.resolve_active_model().ok().flatten().map(|m| m.name));
+    let model_config = match model_alias {
+        Some(name) => Some(repo.resolve_model(&name)?),
+        None => None,
+    };
 
     // Resolve the runtime backend config: model -> endpoint -> provider family.
-    let provider_config = config.resolve_provider(&model_config)?;
-
-    // Initialize backend
-    let backend = arrow_coder_core::llm::init_backend(&provider_config)?;
+    let (_provider_config, backend) = match &model_config {
+        Some(mc) => {
+            let pc = config.resolve_provider(mc)?;
+            let be = arrow_coder_core::llm::init_backend(&pc)?;
+            (Some(pc), Some(be))
+        }
+        None => (None, None),
+    };
 
     // Build the base tool set first (without task/skill to avoid recursive
     // delegation). Tools come from the unified registry so config-driven
@@ -403,9 +439,7 @@ async fn run_interactive_mode(
 
     // Create a configured task tool that can spawn sub-agents.
     let task_graph = std::sync::Arc::new(std::sync::Mutex::new(arrow_coder_core::core::TaskGraph::new()));
-    let task_tool = arrow_coder_core::tools::builtins::task::TaskTool::new()
-        .with_backend(backend.clone())
-        .with_model(model_config.clone())
+    let mut task_tool = arrow_coder_core::tools::builtins::task::TaskTool::new()
         .with_tools(base_tools.clone())
         .with_permission_checker(permission_checker.clone())
         .with_working_dir(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
@@ -413,6 +447,12 @@ async fn run_interactive_mode(
         .with_auto_approve(config.bypass_tool_permissions)
         .with_skill_manager(skill_manager.clone())
         .with_task_graph(task_graph);
+    if let Some(be) = &backend {
+        task_tool = task_tool.with_backend(be.clone());
+    }
+    if let Some(mc) = &model_config {
+        task_tool = task_tool.with_model(mc.clone());
+    }
 
     // Create the skill tool with access to the skill manager.
     let skill_tool = arrow_coder_core::tools::builtins::skill::SkillTool::with_manager(skill_manager.clone());
@@ -427,18 +467,24 @@ async fn run_interactive_mode(
         Err(e) => tracing::warn!("Failed to load MCP tools: {}", e),
     }
 
-    // Create agent loop with backend and tools
+    // Create agent loop with backend and tools（模型缺失时仍构建，待发送前再提示）。
     let mut agent_loop = arrow_coder_core::agent::AgentLoop::new(arrow_coder_core::agent::AgentLoopConfig {
         max_turns: args.max_turns.or(Some(10)),
         max_price: args.max_price,
-        max_session_tokens: args.max_tokens.or(model_config.effective_max_tokens().map(|t| t as u64)),
-        auto_compact_threshold: model_config.auto_compact_threshold,
+        max_session_tokens: model_config
+            .as_ref()
+            .and_then(|m| args.max_tokens.or(m.effective_max_tokens().map(|t| t as u64))),
+        auto_compact_threshold: model_config.as_ref().and_then(|m| m.auto_compact_threshold),
     })
-    .with_backend(backend)
     .with_tools(tools)
-    .with_model(model_config)
     .with_permission_checker(permission_checker)
     .with_working_dir(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    if let Some(be) = &backend {
+        agent_loop = agent_loop.with_backend(be.clone());
+    }
+    if let Some(mc) = model_config {
+        agent_loop = agent_loop.with_model(mc);
+    }
 
     // Attach session logger so the conversation is persisted across turns
     if let Some(logger) = session_manager.logger() {

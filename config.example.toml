@@ -1,9 +1,11 @@
 # Arrow Code Configuration File
 # Place this file at ~/.arrowcode/config.toml or .arrowcode/config.toml (project-local)
 
-# Active model name to use (points at a [[models]].name in the models file)
-active_model = "deepseek-flash"
-
+# Model selection is per-session: choose a model from the selector (or pass
+# `--model <alias>` to the CLI) when starting a session. There is no global
+# default model — a session with no model selected will prompt you to pick one
+# before sending.
+#
 # Standalone model-definition file. Model definitions live here (in
 # models.example.toml) instead of inline. The path is resolved relative to
 # this file (or absolute). Leave unset to define [[models]] inline in this

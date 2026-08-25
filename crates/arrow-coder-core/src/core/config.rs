@@ -366,7 +366,7 @@ impl ProviderConfig {
 /// endpoint with a configurable URL).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
-    /// Display identifier used in the model selector and `active_model`.
+    /// Display identifier used in the model selector.
     pub name: String,
     /// Model id sent to the API (e.g. `deepseek-chat`, `deepseek-reasoner`).
     pub model_id: String,
@@ -503,7 +503,6 @@ fn default_agent_name() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VibeConfig {
-    pub active_model: Option<String>,
     #[serde(default = "default_agent_name")]
     pub default_agent: String,
     /// Path to a standalone model-definition file (relative to this config
@@ -553,7 +552,6 @@ pub struct VibeConfig {
 impl Default for VibeConfig {
     fn default() -> Self {
         Self {
-            active_model: None,
             default_agent: "default".to_string(),
             models_file: None,
             models: vec![],
@@ -575,12 +573,6 @@ impl Default for VibeConfig {
 }
 
 impl VibeConfig {
-    /// Get the active model configuration (matched by `name`).
-    pub fn get_active_model(&self) -> Option<&ModelConfig> {
-        let name = self.active_model.as_ref()?;
-        self.models.iter().find(|m| &m.name == name)
-    }
-
     /// Resolve the runtime backend configuration for a model.
     ///
     /// The model `provider` field **references a built-in provider preset**
@@ -760,7 +752,6 @@ impl VibeConfig {
     /// Merge two configurations (base + override)
     fn merge_configs(base: Self, override_config: Self) -> Self {
         Self {
-            active_model: override_config.active_model.or(base.active_model),
             default_agent: if override_config.default_agent != "default" {
                 override_config.default_agent
             } else {
@@ -828,11 +819,6 @@ impl VibeConfig {
 
     /// Apply environment variable overrides
     fn apply_env_overrides(&mut self) {
-        // VIBE_ACTIVE_MODEL
-        if let Ok(model) = std::env::var("VIBE_ACTIVE_MODEL") {
-            self.active_model = Some(model);
-        }
-
         // VIBE_DEFAULT_AGENT
         if let Ok(agent) = std::env::var("VIBE_DEFAULT_AGENT") {
             self.default_agent = agent;
@@ -944,8 +930,6 @@ impl VibeConfig {
                 extra: std::collections::HashMap::new(),
             },
         ];
-
-        config.active_model = Some("deepseek-flash".to_string());
 
         config
     }
@@ -1100,7 +1084,6 @@ extra = { budget_tokens = 4096 }
     fn valid_config_parses_with_deny_unknown_fields() {
         // 修正后的配置字段应能被正常解析（regression: 曾误用 `default_model`）。
         let toml = r#"
-            active_model = "deepseek-chat"
             models_file = "models.toml"
             default_agent = "default"
             mcp_servers = []
@@ -1115,7 +1098,6 @@ extra = { budget_tokens = 4096 }
         let cfg = toml::from_str::<VibeConfig>(toml);
         assert!(cfg.is_ok(), "expected valid config to parse, got: {:?}", cfg.err());
         let cfg = cfg.unwrap();
-        assert_eq!(cfg.active_model.as_deref(), Some("deepseek-chat"));
         assert_eq!(cfg.models_file.as_deref(), Some("models.toml"));
     }
 
@@ -1139,7 +1121,6 @@ extra = { budget_tokens = 4096 }
         // 空串解析为默认值，保证"零配置"也能初始化（§8.2）。
         let cfg = toml::from_str::<VibeConfig>("").unwrap();
         assert_eq!(cfg.default_agent, "default");
-        assert_eq!(cfg.active_model, None);
         assert!(cfg.models.is_empty());
     }
 
@@ -1154,7 +1135,6 @@ extra = { budget_tokens = 4096 }
         std::fs::write(
             &config_path,
             r#"
-active_model = "extra"
 default_agent = "default"
 models_file = "models.toml"
 "#,

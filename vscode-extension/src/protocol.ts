@@ -209,7 +209,7 @@ export interface ConfigParams {
  *  URL + key). `provider` references a built-in preset: `"deepseek"` |
  *  `"openai"` | `"anthropic"` | `"local"` | `"openai_compatible"`. */
 export interface ConfigModel {
-  /** Display identifier used in the selector and `active_model`. */
+  /** Display identifier used in the selector. */
   name: string;
   /** Model id sent to the API (e.g. `deepseek-chat`, `deepseek-v4-flash`). */
   model_id: string;
@@ -254,7 +254,6 @@ export interface BuiltinCatalog {
  *  (read-only) and are determined by core. */
 export interface ConfigView {
   models: ConfigModel[];
-  active_model?: string | null;
 }
 
 /** A built-in slash command's metadata (mirrors `core::commands::SlashCommandInfo`). */

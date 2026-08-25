@@ -321,7 +321,9 @@ core 已经具备清晰的分层。自底向上：
 | `session_logging: SessionLoggingConfig` | config.rs:442 / 485 / 700 | **零消费**；`SessionLoggingConfig`（config.rs:399，含 `enabled`/`dir`）也无人读取 |
 | `tool_paths: Vec<PathBuf>` | config.rs:448 / 491 / 703 | **零消费**（仅定义 + default + merge） |
 
-**仍被真实消费的字段**（保留）：`active_model`、`models_file`、`default_agent`、`bypass_tool_permissions`、`context_warnings`、`mcp_servers`（mcp/mod.rs:31 真正加载）、`disabled_tools`（tools/manager、permission_checker、agent_loop 均消费）、`installed_agents`/`custom_agents`/`disabled_agents`（agents/manager）、`enabled_skills`/`disabled_skills`（skills/manager）、`tools`（ToolConfig）。
+**仍被真实消费的字段**（保留）：`models_file`、`default_agent`、`bypass_tool_permissions`、`context_warnings`、`mcp_servers`（mcp/mod.rs:31 真正加载）、`disabled_tools`（tools/manager、permission_checker、agent_loop 均消费）、`installed_agents`/`custom_agents`/`disabled_agents`（agents/manager）、`enabled_skills`/`disabled_skills`（skills/manager）、`tools`（ToolConfig）。
+
+> 注（2026-08-25 后续重构）：原 `VibeConfig.active_model` **全局字段已彻底移除**——模型不再有"全局默认"，完全改为 **per-session 选择**（UI 模型选择器 / `--model <alias>` CLI 参数 / `pending_model`）。`AgentConfig.active_model` 仅作为 `ConfigRepository` 的只读投影存在且恒为 `None`（`current_agent_config()` 返回 `active_model: None`），`set_active_model` trait 方法已删除，`config/update` 不再接受 `active_model`，`VIBE_ACTIVE_MODEL` 环境变量也已移除。详见 §8.5。
 
 > 冗余字段来源推测：早期设计预留了"连接器/插件/会话日志/工具路径"能力，但实现从未落地，字段保留在 struct 中参与 merge，造成"配置很重"的错觉且增加维护成本。
 
@@ -358,7 +360,8 @@ core 已经具备清晰的分层。自底向上：
 **core 提供的动态管理 API（via `ConfigRepository` trait，repository.rs:103-172）**：
 - `list_models()` → `Result<Vec<ModelConfig>>`
 - `resolve_model(name) -> Result<ModelConfig>`
-- `set_models(Vec<ModelConfig>)` / `set_active_model(String)` / `set_model_thinking(name, thinking)` / `set_model_reasoning_effort(name, effort)` / `set_model_context_window(name, usize)` / `set_model_max_tokens(name, usize)`
+- `set_models(Vec<ModelConfig>)` / `set_model_thinking(name, thinking)` / `set_model_reasoning_effort(name, effort)` / `set_model_context_window(name, usize)` / `set_model_max_tokens(name, usize)`
+- `resolve_active_model() -> Result<Option<ModelConfig>>`（仅作只读投影，因全局 `active_model` 已移除，实际恒返回 `None`；per-session 当前模型由 host 的 `pending_model` 维护）
 - `available_providers()` / `watch()`（返回变更 `watch::Receiver`，供宿主热更新 UI）
 
 ✅ core **确实提供**完整的 models 动态管理方法（增删改 + 切换 + 监听），vscode 的 `models/builtin`、`config/update` 等方法已对接（见 §3.2）。
@@ -377,6 +380,20 @@ core 已经具备清晰的分层。自底向上：
 | 2026-08-25 | **[实施] `VibeConfig` 加 `#[serde(deny_unknown_fields)]`**（未知字段显式失败而非静默忽略）+ `default_agent` 加 `#[serde(default = "default_agent_name")]`（空配置兜底）；修正 §8.2 初稿对 toml 行为的误判（实测为静默忽略） | §8.2 |
 | 2026-08-25 | **[实施] 回归测试**：`core/config.rs` 新增 `valid_config_parses_with_deny_unknown_fields` / `unknown_field_rejected_by_deny_unknown_fields` / `empty_config_resolves_to_defaults` | §8.2 |
 | 2026-08-25 | **验证**：`cargo build -p arrow-coder-core -p arrow-coder-vscode` 通过；config 模块新测试 3 项全过。遗留 2 个既有失败 `resolve_provider_deepseek_*`（断言 `kind()=="deepseek-chat"` 实际 `"deepseek"`），属 provider 预设语义、与本次配置重构无关，未改动 | §8.4 |
+
+### 8.5 后续重构：移除全局 `active_model`，改为 per-session 模型选择（2026-08-25）
+
+**动机**：全局默认模型语义价值低——用户实际是「为每个 session 各自选择模型」，首 session 可由空起步、中途可切换。保留全局 `active_model` 既是冗余又制造「无配置启动报错」的误导。
+
+**改动一览**：
+- `VibeConfig.active_model` 字段删除；`get_active_model()`、`merge_configs` 的 active_model 合并、`apply_env_overrides` 的 `VIBE_ACTIVE_MODEL` 全部移除；`with_defaults()` 不再注入 `deepseek-flash` 预设。
+- `AgentConfig.default_model` → 改名 `active_model: Option<String>`（仅作 `ConfigRepository` 只读投影，恒为 `None`）；`ConfigRepository::set_active_model` trait 方法删除。
+- `resolve_active_model()` 保留为只读投影（读 `current_agent_config()?.active_model`，恒 `None`），供未来扩展、不影响语义。
+- **vscode host**：`handle_config_update` 不再调用 `set_active_model`；`emit_config` 的当前模型只从 `pending_model` 派生；`ConfigViewPayload` 移除 `active_model`（UI 保存配置只传 `models`）。
+- **CLI**：本地 `resolve_active_model` 辅助上提到 core 共用；新增 `--model <ALIAS>` 参数；`show_config` 打印「per-session (selected via the model selector; no global default)」；TUI `submit_input` 删除全局守卫、改为发送前经 `agent_loop.model()` 校验（空则 `AgentEvent::Error` 提示选模型）。
+- **前端**：`protocol.ts` 的 `ConfigView` 删 `active_model`；`ModelManager.vue` 保存仅传 `{ models }`；`ConfigPayload.active_model`（UI 展示当前 session 模型，由 `pending_model` 派生）保留。
+
+**验证**：`cargo build --workspace` + `cargo test -p arrow-coder-core config -p arrow-coder-vscode -p arrow-coder-cli` 全过；`npx tsc`（extension + webview）零错误。
 
 ---
 

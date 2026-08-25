@@ -106,7 +106,7 @@ P1–P7 全部完成。关键决策与改动如下。
 - 草稿：`store.draft`（直接读写，无 `setDraft` 方法）
 - 历史会话：`store.workspace.workspaces[].sessions[]` + `store.switchTab(\`${path}::${id}\`)`
 - 标签：`store.tabs` / `store.closeTab` / `store.newSession` / `store.renameSession` / `store.activeTab`
-- 配置保存：`store.saveConfig(ConfigView)`（`{models, active_model?}`），RPC `config/update`
+- 配置保存：`store.saveConfig(ConfigView)`（`{models}`），RPC `config/update`（注意：`ConfigView` 已移除 `active_model`，模型选择完全 per-session，保存配置只传模型列表）
 
 **ConfigModel 真实字段**（无 `supports_thinking` / `vision` / `use_env_key`）：`name` / `model_id` / `provider` / `endpoint` / `api_key` / `thinking` / `reasoning_effort` / `temperature` / `top_p` / `max_tokens` / `auto_compact_threshold`。
 
@@ -116,7 +116,7 @@ P1–P7 全部完成。关键决策与改动如下。
 - **P1 样式地基**：新增 `webview/src/theme.css`（`--vscode-*` → 语义 token：`--bg` / `--bg-hover` / `--bg-secondary` / `--bg-panel` / `--bg-input` / `--bg-elevated` / `--text` / `--text-muted` / `--border` / `--accent` / `--focus-border` / `--info` / `--success` / `--warn` / `--error` 等）；`style.css` 改 import theme；全组件 rgba/# 硬编码 → token；emoji → Codicon（`&#xeab6;` chevron / `&#xea71;` check / `&#xea76;` trash / `&#xea8e;` thinking）；清理 `App.vue` 死 `.titlebar` 样式。修复了 `FileChangesPanel`/`TodoPanel` 的 `var(--hover)` / `var(--success, var(--success))` 循环引用 bug。
 - **P2 布局重构**：`App.vue` 顶层 `view='chat'|'settings'` 切换；历史改为顶部 Popover（`flatSessions` 由 `workspace.workspaces` 派生，`onSelectSession`→`switchTab`）；设置从抽屉改为独立 `SettingsView`（新建，用 `vscode-tabs` 整合 `ModelManager` / `McpManager` / `PermissionManager` / `AboutPanel`）；删除旧 `ModelSettings.vue` 抽屉。
 - **P3 模型 Pill**：新建 `ModelPill.vue`（props `models`/`current`/`thinking`/`effort`，emits `select`/`set-effort`），内嵌于重写后的 `Composer.vue`；`selectModel`/`setEffort`→`store.reconfigure`；`Toolbar.vue` 仅保留 history + settings 两个图标按钮，删除自制模型菜单。
-- **P4 配置表单升级**：`ModelManager.vue` 编辑本地 `ConfigModel[]` 副本，增量保存 `store.saveConfig({models, active_model})`；可折叠行 + API Key 遮罩 + 字段校验；直接读 `store.config.full?.models`（移除不存在的 `loadConfig` 调用）。
+- **P4 配置表单升级**：`ModelManager.vue` 编辑本地 `ConfigModel[]` 副本，增量保存 `store.saveConfig({models})`；可折叠行 + API Key 遮罩 + 字段校验；直接读 `store.config.full?.models`（移除不存在的 `loadConfig` 调用）。
 - **P5 工具 Timeline**：`ToolCallCard.vue` 重写为步骤流 + diff 折叠 + Codicon。
 - **P6 空状态/引导**：`MessageList.vue` 空状态示例 chips（`useExample`→`store.draft=prompt` + textarea 聚焦）、骨架屏。
 - **P7 独立面板**：`chatPanel.ts` 抽取 `renderHtml(webview)`，新增 `openInEditor()` 创建 `vscode.WebviewPanel('arrowCoder.chatEditor', 'Arrow Coder Chat', ViewColumn.Beside, ...)`，转发 host 通知/状态并复用 `handleUiMessage`；`extension.ts` 注册 `arrowCoder.openInEditor`；`package.json` 新增命令（`$(split-horizontal)`）+ view/title 菜单（修复了两次 replace 导致的 JSON 嵌套损坏）。

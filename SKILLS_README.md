@@ -25,17 +25,19 @@ Configuration is loaded in the following priority (later overrides earlier):
 ### Environment Variables
 
 - `VIBE_HOME` - Override config directory (default: `~/.vibe`)
-- `VIBE_ACTIVE_MODEL` - Override active model
 - `VIBE_DEFAULT_AGENT` - Override default agent
 - `VIBE_BYPASS_TOOL_PERMISSIONS` - Skip tool approvals
 - `VIBE_CONTEXT_WARNINGS` - Enable/disable context warnings
+
+> Note: There is **no global active model**. The model is chosen per-session
+> via the model selector in the UI or the `--model <alias>` CLI flag. The
+> removed `VIBE_ACTIVE_MODEL` / `active_model` options are no longer supported.
 
 ### Example Configuration
 
 ```toml
 # ~/.vibe/config.toml
 
-active_model = "mistral-large"
 default_agent = "default"
 
 [[providers]]
@@ -197,9 +199,9 @@ let config = VibeConfig::load_resolved()?;
 // Or load specific file
 let config = VibeConfig::load(&path)?;
 
-// Get active model
-if let Some(model) = config.get_active_model() {
-    println!("Using: {}", model.name);
+// Resolve a model by alias (per-session selection happens via the host/CLI)
+if let Ok(model) = config.resolve_model("gpt4o") {
+    println!("Resolved: {}", model.name);
 }
 ```
 

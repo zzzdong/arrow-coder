@@ -942,6 +942,14 @@ impl AgentLoop {
         }
     }
 
+    /// Current model configuration, if one has been selected for this session.
+    /// `None` means the session has no model yet (e.g. not chosen at creation,
+    /// or switched away) — the caller should prompt the user to pick one
+    /// before sending a request.
+    pub fn model(&self) -> Option<&crate::core::ModelConfig> {
+        self.model.as_ref()
+    }
+
     pub fn add_middleware(&mut self, middleware: Box<dyn crate::agent::middleware::Middleware>) {
         self.middleware_pipeline.add(middleware);
     }

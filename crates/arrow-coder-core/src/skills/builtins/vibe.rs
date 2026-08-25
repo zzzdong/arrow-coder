@@ -61,13 +61,14 @@ When in a trusted folder, Arrow Code also looks for project-local configuration:
 ## Configuration (config.toml)
 
 The configuration file uses TOML format. Settings can also be overridden via
-environment variables with the `ARROWCODE_` prefix (e.g., `ARROWCODE_ACTIVE_MODEL=local`).
+environment variables with the `ARROWCODE_` prefix (e.g., `ARROWCODE_DEFAULT_AGENT=default`).
 
 ### Key Settings
 
 ```toml
 # Model selection
-active_model = "gpt4o"  # Model alias to use (see [[models]])
+# There is NO global default model — the model is chosen per-session via the
+# model selector in the UI or the `--model <alias>` CLI flag (see [[models]]).
 
 # Behavior
 bypass_tool_permissions = false    # Skip tool approval prompts
@@ -231,9 +232,12 @@ When running in an untrusted directory, Arrow Code will:
 ## Common Tasks
 
 ### Change Active Model
+The model is selected per-session, not globally:
 ```bash
-arrow-code --config  # View current config
-# Edit ~/.arrowcode/config.toml and change active_model
+arrow-code --model gpt4o          # Pick a model for this session (CLI)
+arrow-code --config               # View current config
+# In the VS Code extension, use the model selector in the composer toolbar.
+# Edit ~/.arrowcode/models.toml to add/edit the available models (see [[models]]).
 ```
 
 ### Add Custom Skill

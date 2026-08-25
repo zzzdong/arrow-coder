@@ -72,7 +72,7 @@ async function save() {
   saveState.value = 'saving';
   saveError.value = null;
   try {
-    await store.saveConfig({ models: models.value, active_model: store.config?.active_model ?? null });
+    await store.saveConfig({ models: models.value });
     dirty.value = false;
     saveState.value = 'idle';
   } catch (e) {

@@ -738,16 +738,11 @@ impl Host {
         };
 
         // 写模型注册表（Model 域）：直接经 repo 接缝持久化 + 广播变更，
-        // 不再手动 save_split + reload。
+        // 不再手动 save_split + reload。全局 active_model 已移除——模型选择
+        // 改由 session 级 `session/reconfigure` 维护，不再经 config/update 持久化。
         if let Err(e) = repo.set_models(full.models) {
             return vec![Event::Error {
                 error: format!("failed to save models: {}", e),
-            }];
-        }
-        // 写激活模型（Agent 域）。
-        if let Err(e) = repo.set_active_model(full.active_model.as_deref()) {
-            return vec![Event::Error {
-                error: format!("failed to save active model: {}", e),
             }];
         }
 
@@ -802,28 +797,15 @@ impl Host {
             .expect("emit_config called before init");
         let cfg_snapshot = repo.snapshot();
 
-        let active_alias = self
-            .pending_model
-            .clone()
-            .or_else(|| {
-                repo.current_agent_config()
-                    .ok()
-                    .and_then(|a| a.default_model)
-            })
-            .unwrap_or_default();
+        let active_alias = self.pending_model.clone().unwrap_or_default();
 
         // Resolve the model that will actually be used next (pending override
-        // wins), so the shown effort reflects the live selection.
+        // wins), so the shown effort reflects the live selection. 全局
+        // active_model 已移除，session 当前模型仅来自 `pending_model`。
         let effective_model = self
             .pending_model
             .as_ref()
-            .and_then(|alias| repo.resolve_model(alias).ok())
-            .or_else(|| {
-                repo.current_agent_config()
-                    .ok()
-                    .and_then(|a| a.default_model)
-                    .and_then(|alias| repo.resolve_model(&alias).ok())
-            });
+            .and_then(|alias| repo.resolve_model(alias).ok());
 
         let active_effort = self
             .pending_effort
@@ -851,7 +833,6 @@ impl Host {
                 .collect(),
             full: Some(ConfigViewPayload {
                 models: cfg_snapshot.models.clone(),
-                active_model: cfg_snapshot.active_model.clone(),
             }),
             config_path: Some(repo.config_path_display()),
             models_file: repo.models_path_display(),
@@ -1348,17 +1329,16 @@ impl Host {
 
         let auto_approve = params.auto_approve.unwrap_or(config.bypass_tool_permissions);
 
-        // Model + provider resolution — 经 repo 取激活模型并解析（消除
-        // 原先 `cfg.models.iter().find` 式的重复加载逻辑）。
-        let active_alias = repo
-            .current_agent_config()?
-            .default_model
-            .ok_or_else(|| {
-                arrow_coder_core::core::ArrowError::Config(
-                    "No active model configured. Set 'active_model' in your config file.".to_string(),
-                )
-            })?;
-        let model_config = repo.resolve_model(&active_alias)?;
+        // 模型解析——取本 session 已选择的模型（经 `session/reconfigure` 设置的
+        // `pending_model`）。全局 active_model 已移除，模型选择完全由 session 级
+        // 维护；此处确实要发请求，若 session 尚无选中模型则给出友好报错。
+        let model_alias = self.pending_model.clone().ok_or_else(|| {
+            arrow_coder_core::core::ArrowError::Config(
+                "No model selected for this session. Choose a model from the selector before sending."
+                    .to_string(),
+            )
+        })?;
+        let model_config = repo.resolve_model(&model_alias)?;
 
         // Resolve the runtime backend config: model -> endpoint -> provider
         // family. This supports multiple endpoints per protocol family (e.g.

@@ -41,6 +41,11 @@ pub struct CliArgs {
     #[arg(short, long, value_name = "NAME")]
     pub agent: Option<String>,
 
+    /// Select the model for this session (per-session; no global default).
+    /// Required when sending a prompt and the session has no model selected yet.
+    #[arg(long, value_name = "ALIAS")]
+    pub model: Option<String>,
+
     /// Trust the current working directory
     #[arg(long)]
     pub trust: bool,
@@ -140,6 +145,7 @@ impl Default for CliArgs {
             enabled_tools: Vec::new(),
             output: OutputFormat::Text,
             agent: None,
+            model: None,
             trust: false,
             setup: false,
             config: false,

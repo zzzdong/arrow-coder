@@ -484,7 +484,7 @@ pub struct ReconfigureParams {
 pub struct ConfigPayload {
     /// All selectable models: `(alias, display_name)`.
     pub models: Vec<(String, String)>,
-    /// Currently active model alias.
+    /// Currently active model alias (session-level; empty if none selected yet).
     pub active_model: String,
     /// Currently active reasoning effort (already resolved).
     pub active_effort: Option<String>,
@@ -555,9 +555,6 @@ pub struct BuiltinCatalogPayload {
 pub struct ConfigViewPayload {
     /// Full model definitions (self-contained: provider + URL + key).
     pub models: Vec<ModelConfig>,
-    /// Currently active model name.
-    #[serde(default)]
-    pub active_model: Option<String>,
 }
 
 /// Params for the `config/update` request: the full config view as edited in

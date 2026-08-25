@@ -346,6 +346,8 @@ harness 纪律③（能力缝三件套、多实现、消费者不碰后端）现
 4. **TUI (`app.rs`) 未切换**：TUI 内部持有 `VibeConfig` 用于一次性初始化（无 pending 双份态），本次未强行替换，保持范围聚焦。后续可在 R4 统一时一并收敛。
 5. **CLI `run_*` 仍传 `VibeConfig`**：`resolve_provider`/`bypass_tool_permissions`/`PermissionChecker` 等仍需 `VibeConfig` 方法；但模型解析与列表已改经 repo，配置只 load 一次（`repo.snapshot()`）。
 
+> **后续变更（2026-08-25）**：上表中的 `set_active_model` 与「`AgentConfig` 暴露 `active_model` 投影」已在 per-session 模型重构中被移除/弱化——全局 `VibeConfig.active_model` 字段删除，`set_active_model` trait 方法删除，`config/update` 不再接受 `active_model`，`VIBE_ACTIVE_MODEL` 环境变量移除；`AgentConfig.active_model` 仅保留为恒 `None` 的只读投影。模型选择全面改为 per-session（`pending_model` / `--model <alias>` / UI 选择器）。详见 `core-architecture-and-vscode-contract.md` §8.5。
+
 **未消除的残留**：`WorkspaceIndex` 标题副本属 R4 收口项（见 §6.3 强制验收），不在 R2 范围。
 
 ### 9.8 R3 落地（2026-08-23）
