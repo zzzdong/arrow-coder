@@ -308,7 +308,6 @@ impl Tool for BashSessionTool {
 
                 #[cfg(unix)]
                 {
-                    use std::os::unix::process::CommandExt;
                     cmd.process_group(0);
                 }
 

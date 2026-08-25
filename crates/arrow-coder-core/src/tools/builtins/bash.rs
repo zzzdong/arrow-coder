@@ -195,7 +195,6 @@ impl Tool for BashTool {
         // On Unix, start new session to allow killing process group
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
 

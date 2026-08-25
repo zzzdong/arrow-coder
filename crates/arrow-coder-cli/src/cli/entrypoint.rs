@@ -3,7 +3,7 @@
 use crate::cli::args::{CliArgs, OutputFormat};
 use crate::cli::commands::CommandRegistry;
 use arrow_coder_core::core::config::VibeConfig;
-use arrow_coder_core::core::error::{ArrowError, Result};
+use arrow_coder_core::core::error::Result;
 use arrow_coder_core::core::BaseEvent;
 use arrow_coder_core::core::{ConfigRepository, LocalConfigRepository};
 use arrow_coder_core::session::{
