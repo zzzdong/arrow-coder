@@ -156,17 +156,17 @@ async function selectModel(id: string) {
         <div v-if="expandedId === `m${idx}`" class="mm-form" @click.stop>
           <div class="mm-field">
             <label>显示名称</label>
-            <vscode-text-field
+            <vscode-textfield
               :value="m.name"
               @input="m.name = ($event.target as HTMLInputElement).value; touch()"
-            ></vscode-text-field>
+            ></vscode-textfield>
           </div>
           <div class="mm-field">
             <label>模型 ID <span class="ac-muted">(如 deepseek-chat)</span></label>
-            <vscode-text-field
+            <vscode-textfield
               :value="m.model_id"
               @input="m.model_id = ($event.target as HTMLInputElement).value; touch()"
-            ></vscode-text-field>
+            ></vscode-textfield>
           </div>
           <div class="mm-field">
             <label>供应商</label>
@@ -183,20 +183,20 @@ async function selectModel(id: string) {
           </div>
           <div class="mm-field">
             <label>API 地址 <span class="ac-muted">(留空用预设)</span></label>
-            <vscode-text-field
+            <vscode-textfield
               placeholder="https://api.deepseek.com/v1"
               :value="m.endpoint ?? ''"
               @input="m.endpoint = ($event.target as HTMLInputElement).value || null; touch()"
-            ></vscode-text-field>
+            ></vscode-textfield>
           </div>
           <div class="mm-field">
             <label>API Key <span class="ac-muted">(留空用环境变量)</span></label>
-            <vscode-text-field
+            <vscode-textfield
               type="password"
               placeholder="sk-... 或留空走环境变量"
               :value="m.api_key ?? ''"
               @input="m.api_key = ($event.target as HTMLInputElement).value || null; touch()"
-            ></vscode-text-field>
+            ></vscode-textfield>
           </div>
 
           <div class="mm-field mm-field-inline">
@@ -211,32 +211,32 @@ async function selectModel(id: string) {
             </div>
             <div class="mm-num">
               <label>最大输出 tokens</label>
-              <vscode-text-field
+              <vscode-textfield
                 type="number"
                 :value="String(m.max_tokens ?? '')"
                 @input="m.max_tokens = Number(($event.target as HTMLInputElement).value) || null; touch()"
-              ></vscode-text-field>
+              ></vscode-textfield>
             </div>
           </div>
 
           <div class="mm-field mm-field-inline">
             <div class="mm-num">
               <label>温度</label>
-              <vscode-text-field
+              <vscode-textfield
                 type="number"
                 step="0.1"
                 :value="String(m.temperature ?? '')"
                 @input="m.temperature = Number(($event.target as HTMLInputElement).value) || null; touch()"
-              ></vscode-text-field>
+              ></vscode-textfield>
             </div>
             <div class="mm-num">
               <label>Top-P</label>
-              <vscode-text-field
+              <vscode-textfield
                 type="number"
                 step="0.1"
                 :value="String(m.top_p ?? '')"
                 @input="m.top_p = Number(($event.target as HTMLInputElement).value) || null; touch()"
-              ></vscode-text-field>
+              ></vscode-textfield>
             </div>
           </div>
 

@@ -78,14 +78,14 @@ const version = ''; // reserved for indexed-state banner
     <div v-if="historyOpen" ref="historyRef" class="history-popover" role="dialog">
       <div class="hp-header">
         <span class="hp-title">会话历史</span>
-        <vscode-text-field
+        <vscode-textfield
           class="hp-search"
           placeholder="搜索会话…"
           :value="historyQuery"
           @input="historyQuery = ($event.target as HTMLInputElement).value"
         >
           <span slot="start" class="ac-codicon hp-search-icon">&#xea6e;</span>
-        </vscode-text-field>
+        </vscode-textfield>
       </div>
       <div class="hp-list">
         <div v-if="filteredSessions.length === 0" class="hp-empty">没有匹配的会话</div>
