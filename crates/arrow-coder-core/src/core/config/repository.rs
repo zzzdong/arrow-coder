@@ -55,7 +55,7 @@ pub struct ModelSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
     pub default_agent: String,
-    pub active_model: Option<String>,
+    pub default_model: Option<String>,
 }
 
 /// 配置仓库接缝。所有配置读写都经此 trait。
@@ -173,7 +173,7 @@ impl ConfigRepository for LocalConfigRepository {
         let cfg = self.inner.lock().unwrap();
         Ok(AgentConfig {
             default_agent: cfg.default_agent.clone(),
-            active_model: cfg.active_model.clone(),
+            default_model: cfg.active_model.clone(),
         })
     }
 
@@ -227,7 +227,7 @@ mod tests {
         let models = repo.list_models().unwrap();
         assert!(!models.is_empty(), "default config should expose models");
         let agent = repo.current_agent_config().unwrap();
-        if let Some(active) = agent.active_model {
+        if let Some(active) = agent.default_model {
             let m = repo.resolve_model(&active).unwrap();
             assert_eq!(m.name, active);
         }
@@ -261,7 +261,7 @@ mod tests {
         let mut rx = repo.watch();
         repo.set_active_model(Some("m_test")).unwrap();
         assert_eq!(
-            repo.current_agent_config().unwrap().active_model,
+            repo.current_agent_config().unwrap().default_model,
             Some("m_test".to_string())
         );
         let change = rx.try_recv().expect("should receive change");

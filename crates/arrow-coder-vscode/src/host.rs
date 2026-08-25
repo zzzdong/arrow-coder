@@ -48,7 +48,6 @@ use crate::jsonrpc::{
     SwitchWorkspaceParams, UserAnswerParams, UserQuestionPayload, UsagePayload,
     WorkspaceStatePayload,
 };
-use crate::workspace::WorkspaceIndex;
 
 /// Outcome of handling one request.
 ///
@@ -98,8 +97,6 @@ pub struct Host {
     pending_model: Option<String>,
     /// Pending reasoning-effort override; applied on the next `session/prompt`.
     pending_effort: Option<String>,
-    /// Workspace registry, persisted next to the session directory.
-    workspaces: Arc<Mutex<WorkspaceIndex>>,
     /// Session persistence config, captured at `initialize`/`build_session` time.
     /// Used to reach the on-disk store for true deletion (not just registry prune).
     session_config: Option<SessionLoggerConfig>,
@@ -127,11 +124,6 @@ pub struct Host {
 
 impl Host {
     pub fn new() -> Self {
-        // Place the workspace registry next to the session store so a single
-        // `workspace.json` indexes every conversation.
-        let sessions_dir = arrow_coder_core::core::config::VibeConfig::arrowcode_home()
-            .unwrap_or_else(|| PathBuf::from(".arrowcode"))
-            .join("sessions");
         Self {
             session: Arc::new(Mutex::new(AgentSession::new(AgentLoopConfig::default()))),
             initialized: false,
@@ -140,7 +132,6 @@ impl Host {
             repo: None,
             pending_model: None,
             pending_effort: None,
-            workspaces: Arc::new(Mutex::new(WorkspaceIndex::open(&sessions_dir))),
             active_cwd: None,
             active_session_id: None,
             session_config: None,
@@ -323,6 +314,10 @@ impl Host {
             "session/inject" => HandleOutcome::events(self.handle_inject(req.params).await),
             "session/reconfigure" => HandleOutcome::events(self.handle_reconfigure(req.params).await),
             "config/update" => HandleOutcome::events(self.handle_config_update(req.params).await),
+            // 方案 A（§6/§7）：workspace 概念已退化为 "按 cwd 分组的会话派生视图"，
+            // 不再维护 WorkspaceIndex。以下三个方法保留向后兼容（deprecated），
+            // 新前端应改用 `session/list`（全集，前端按 cwd 分组）+ `session/open` 语义。
+            // 它们当前实现已不依赖 WorkspaceIndex，等价于直接派生 workspace_state。
             "workspace/list" => HandleOutcome::events(vec![self.emit_workspace_state()]),
             "workspace/switch" => HandleOutcome::events(self.handle_switch_workspace(req.params).await),
             "workspace/openSession" => HandleOutcome::events(self.handle_open_session(req.params).await),
@@ -813,7 +808,7 @@ impl Host {
             .or_else(|| {
                 repo.current_agent_config()
                     .ok()
-                    .and_then(|a| a.active_model)
+                    .and_then(|a| a.default_model)
             })
             .unwrap_or_default();
 
@@ -826,7 +821,7 @@ impl Host {
             .or_else(|| {
                 repo.current_agent_config()
                     .ok()
-                    .and_then(|a| a.active_model)
+                    .and_then(|a| a.default_model)
                     .and_then(|alias| repo.resolve_model(&alias).ok())
             });
 
@@ -863,70 +858,82 @@ impl Host {
         })
     }
 
-    /// Build a `workspace_state` event snapshot from the in-memory registry.
+    /// Build a `workspace_state` event snapshot by deriving from
+    /// `SessionRepository::list` (header.json is the single source of truth).
     ///
-    /// R4 收口：session 的 title / cwd / created_at **从 `SessionRepository::list`
-    /// 派生**（header.json 真相），`WorkspaceIndex` 只提供 workspace 根路径与
-    /// 激活顺序（id 顺序），不再持有 title 副本。
+    /// 方案 A（§6 / §7）：core 不感知 "workspace" 概念；"工作区" 在此仅是
+    /// "按 cwd 分组的会话集合" 的同义派生视图。因此不再依赖 `WorkspaceIndex`
+    /// （冗余第二真相源），直接从 session_repo 全集在内存 `group_by(cwd)` 得到
+    /// 工作区列表，标题取 `basename(cwd)`。
     fn emit_workspace_state(&self) -> Event {
+        let payload = self.derive_workspace_state();
+        Event::WorkspaceState(payload)
+    }
+
+    /// Derive the workspace registry purely from `SessionRepository::list`.
+    ///
+    /// - Group all sessions by `cwd` (None cwd 归入一个匿名分组，title 用空串
+    ///   以避免 panic；前端按 path 渲染，None cwd 表现为 "<no path>")。
+    /// - Each workspace's title = `basename(cwd)`（与旧 `WorkspaceEntry` 同义）。
+    /// - Sessions within a workspace ordered by `created_at` descending (最新在前)。
+    /// - `active_path` / `active_session` 来自 host 的当前激活指针。
+    fn derive_workspace_state(&self) -> WorkspaceStatePayload {
         let mut payload = WorkspaceStatePayload {
             workspaces: Vec::new(),
             active_path: self.active_cwd.clone(),
             active_session: self.active_session_id.clone(),
         };
-        // 标题真相源：repo 的 header（若尚未初始化，则回退到 WS 旧副本）。
-        let repo = self.session_repo.as_ref();
-        if let Ok(idx) = self.workspaces.try_lock() {
-            payload.workspaces = idx
-                .list()
+        let repo = match self.session_repo.as_ref() {
+            Some(r) => r,
+            None => return payload,
+        };
+        let all = match repo.list(&SessionFilter {
+            cwd: None,
+            query: None,
+            limit: None,
+            origin: None,
+        }) {
+            Ok(v) => v,
+            Err(_) => return payload,
+        };
+        // group_by cwd
+        let mut groups: std::collections::BTreeMap<String, Vec<arrow_coder_core::session::SessionSummary>> =
+            std::collections::BTreeMap::new();
+        for s in all {
+            let key = s.cwd.clone().unwrap_or_default();
+            groups.entry(key).or_default().push(s);
+        }
+        for (cwd, mut sessions) in groups {
+            // 最新 created_at 在前
+            sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            let title = if cwd.is_empty() {
+                "<no path>".to_string()
+            } else {
+                std::path::Path::new(&cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| cwd.clone())
+            };
+            let ws_sessions = sessions
                 .into_iter()
-                .map(|ws| {
-                    // 经 repo 取该 cwd 下的会话详情（title/cwd/created_at），
-                    // 以 WS 的 id 顺序作为激活顺序（UI 状态）。
-                    let details: std::collections::HashMap<
-                        String,
-                        arrow_coder_core::session::SessionSummary,
-                    > = match repo {
-                        Some(r) => r
-                            .list(&SessionFilter {
-                                cwd: Some(std::path::PathBuf::from(ws.path.clone())),
-                                query: None,
-                                limit: None,
-                                origin: None,
-                            })
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|e| (e.id.to_string(), e))
-                            .collect(),
-                        None => std::collections::HashMap::new(),
-                    };
-                    let sessions = ws
-                        .sessions
-                        .iter()
-                        .filter_map(|s| {
-                            let entry = details.get(&s.id)?;
-                            let title = entry
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| format!("(untitled {})", &s.id[..s.id.len().min(8)]));
-                            Some(crate::jsonrpc::WorkspaceSessionPayload {
-                                id: s.id.clone(),
-                                title,
-                                created_at: Some(entry.created_at),
-                            })
-                        })
-                        .collect();
-                    crate::jsonrpc::WorkspacePayload {
-                        path: ws.path,
-                        title: ws.title,
-                        created_at: Some(ws.created_at),
-                        last_seen: Some(ws.last_seen),
-                        sessions,
-                    }
+                .map(|s| crate::jsonrpc::WorkspaceSessionPayload {
+                    id: s.id.to_string(),
+                    title: s
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("(untitled {})", &s.id.to_string()[..s.id.to_string().len().min(8)])),
+                    created_at: Some(s.created_at),
                 })
                 .collect();
+            payload.workspaces.push(crate::jsonrpc::WorkspacePayload {
+                path: cwd,
+                title,
+                created_at: None,
+                last_seen: None,
+                sessions: ws_sessions,
+            });
         }
-        Event::WorkspaceState(payload)
+        payload
     }
 
     /// Handle `workspace/switch`: attach the host to a different workspace root.
@@ -1036,12 +1043,8 @@ impl Host {
             Ok(p) => p,
             Err(e) => return vec![Event::Error { error: format!("bad delete params: {}", e) }],
         };
-        // Prune the in-memory registry so the UI immediately drops the tab.
-        if let Some(cwd) = self.active_cwd.clone() {
-            if let Ok(mut idx) = self.workspaces.try_lock() {
-                idx.remove_session(&cwd, &params.session_id);
-            }
-        }
+        // 方案 A：不再维护 WorkspaceIndex，无需内存 prune；UI 立即刷新由
+        // 末尾 emit_workspace_state（从 session_repo 派生）保证。
         // Truly delete the on-disk session directory via the session repository
         // (which locates it by scanning `save_dir`). The registry prune alone
         // would leave the files orphaned and re-discoverable by
@@ -1349,7 +1352,7 @@ impl Host {
         // 原先 `cfg.models.iter().find` 式的重复加载逻辑）。
         let active_alias = repo
             .current_agent_config()?
-            .active_model
+            .default_model
             .ok_or_else(|| {
                 arrow_coder_core::core::ArrowError::Config(
                     "No active model configured. Set 'active_model' in your config file.".to_string(),
@@ -1382,10 +1385,21 @@ impl Host {
         let effective_resume: Option<String> = if params.resume.is_some() {
             params.resume.clone()
         } else if !params.fresh.unwrap_or(false) {
-            self.workspaces
-                .try_lock()
-                .ok()
-                .and_then(|idx| idx.latest_session(&cwd_str))
+            // 方案 A：auto-resume 取该 cwd 下最新 created_at 的会话，
+            // 替代旧 WorkspaceIndex::latest_session（冗余第二真相源）。
+            let local_repo = LocalSessionRepository::new(session_config.clone());
+            match local_repo.list(&SessionFilter {
+                cwd: Some(std::path::PathBuf::from(cwd_str.clone())),
+                query: None,
+                limit: None,
+                origin: None,
+            }) {
+                Ok(mut v) => {
+                    v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    v.first().map(|s| s.id.to_string())
+                }
+                Err(_) => None,
+            }
         } else {
             None
         };
@@ -1657,9 +1671,9 @@ impl Host {
         // workspace. The session id may only be available after the manager
         // finalizes, so we set active_cwd unconditionally and register the
         // session when its id is known.
+        // 方案 A：不再维护 WorkspaceIndex，active 指针直接记录即可。
         self.active_cwd = Some(cwd_str.clone());
-        if let (Some(id), Ok(mut idx)) = (session_id.clone(), self.workspaces.try_lock()) {
-            idx.register_session(&cwd_str, &id, None, None);
+        if let Some(id) = session_id.clone() {
             self.active_session_id = Some(id);
         }
         // Stash the persistence config so `session/delete` can reach the on-disk

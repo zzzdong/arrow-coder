@@ -162,7 +162,7 @@ fn build_config_repo(args: &CliArgs) -> LocalConfigRepository {
 fn resolve_active_model(repo: &LocalConfigRepository) -> Result<arrow_coder_core::core::config::ModelConfig> {
     let alias = repo
         .current_agent_config()?
-        .active_model
+        .default_model
         .ok_or_else(|| {
             ArrowError::Config(
                 "No active model configured. Please set 'active_model' in your config file."
@@ -205,7 +205,7 @@ async fn list_models(repo: &LocalConfigRepository) -> Result<()> {
     let agent = repo.current_agent_config()?;
     println!("Available Models:");
     for m in repo.list_models()? {
-        let marker = if Some(&m.name) == agent.active_model.as_ref() {
+        let marker = if Some(&m.name) == agent.default_model.as_ref() {
             "*"
         } else {
             " "

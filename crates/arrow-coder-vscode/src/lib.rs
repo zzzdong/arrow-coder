@@ -10,7 +10,6 @@
 
 pub mod host;
 pub mod jsonrpc;
-pub mod workspace;
 
 pub use host::HandleOutcome;
 pub use host::Host;
