@@ -92,7 +92,7 @@ function onBodyClick(e: MouseEvent) {
 <template>
   <details ref="detailsEl" class="thinking-block" @toggle="onToggle">
     <summary class="think-head">
-      <span class="think-icon">💭</span>
+      <span class="ac-codicon think-icon">&#xea8e;</span>
       <span>{{ props.text ? '思考过程' : '思考中…' }}</span>
     </summary>
     <div
@@ -106,9 +106,9 @@ function onBodyClick(e: MouseEvent) {
 
 <style scoped>
 .thinking-block {
-  border-left: 3px solid var(--vscode-charts-purple, #a6f);
+  border-left: 3px solid var(--charts-purple);
   margin: 3px 0;
-  background: rgba(160, 120, 255, 0.1);
+  background: var(--bg-secondary);
   font-size: 0.9em;
 }
 .think-head {
@@ -123,7 +123,7 @@ function onBodyClick(e: MouseEvent) {
   display: none;
 }
 .think-head::before {
-  content: '▶';
+  content: '⮞';
   display: inline-block;
   margin-right: 6px;
   font-size: 0.8em;
@@ -160,36 +160,36 @@ function onBodyClick(e: MouseEvent) {
   font-style: italic;
 }
 .thinking :deep(a) {
-  color: var(--vscode-textLink-foreground, #4af);
+  color: var(--info);
   text-decoration: underline;
 }
 .thinking :deep(blockquote) {
-  border-left: 3px solid var(--vscode-panel-border, #333);
+  border-left: 3px solid var(--border);
   margin: 6px 0;
   padding-left: 8px;
   opacity: 0.85;
 }
 .thinking :deep(code) {
-  background: rgba(127, 127, 127, 0.18);
+  background: var(--bg-hover);
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 0.9em;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
 }
 .thinking :deep(.code-block) {
   margin: 6px 0;
-  border: 1px solid var(--vscode-panel-border, #333);
+  border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
-  background: var(--vscode-editor-background, #1e1e1e);
+  background: var(--bg);
 }
 .thinking :deep(.code-head) {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 3px 8px;
-  background: rgba(127, 127, 127, 0.1);
-  border-bottom: 1px solid var(--vscode-panel-border, #333);
+  background: var(--bg-hover);
+  border-bottom: 1px solid var(--border);
 }
 .thinking :deep(.code-lang) {
   font-size: 0.7em;
@@ -200,14 +200,14 @@ function onBodyClick(e: MouseEvent) {
 .thinking :deep(.code-copy) {
   font-size: 0.7em;
   padding: 1px 8px;
-  border: 1px solid var(--vscode-panel-border, #333);
+  border: 1px solid var(--border);
   border-radius: 4px;
   background: transparent;
-  color: var(--vscode-foreground, #ddd);
+  color: var(--text);
   cursor: pointer;
 }
 .thinking :deep(.code-copy:hover) {
-  background: rgba(127, 127, 127, 0.15);
+  background: var(--bg-hover);
 }
 .thinking :deep(.code-copy:disabled) {
   opacity: 0.6;
@@ -222,7 +222,7 @@ function onBodyClick(e: MouseEvent) {
   background: none;
   padding: 0;
   font-size: 0.85em;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--font-mono);
   white-space: pre;
 }
 </style>

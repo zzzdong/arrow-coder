@@ -34,6 +34,24 @@ export class HostController {
     if (extensionUri) {
       this.host.setExtensionUri(extensionUri);
     }
+    // Subscribe once for the controller's lifetime. Notifications/status are
+    // fanned out to all registered handlers; re-registering on every `start()`
+    // would cause duplicate delivery after a restart.
+    this.host.onNotification((n) => {
+      for (const cb of this.notifHandlers) {
+        cb(n);
+      }
+    });
+    this.host.onStatus((ready, error) => {
+      if (ready) {
+        this._state = 'running';
+      } else {
+        this._state = error ? 'error' : 'stopped';
+      }
+      for (const cb of this.statusHandlers) {
+        cb(ready, error);
+      }
+    });
   }
 
   get state(): HostState {
@@ -66,23 +84,28 @@ export class HostController {
     }
     this._state = 'spawning';
 
-    this.host.onNotification((n) => {
-      for (const cb of this.notifHandlers) {
-        cb(n);
-      }
-    });
-    this.host.onStatus((ready, error) => {
-      if (ready) {
-        this._state = 'running';
-      } else {
-        this._state = error ? 'error' : 'stopped';
-      }
-      for (const cb of this.statusHandlers) {
-        cb(ready, error);
-      }
-    });
-
     try {
+      await this.host.start(params);
+      this._state = 'running';
+    } catch (err) {
+      this._state = 'error';
+      throw err;
+    }
+  }
+
+  /**
+   * Restart the host: terminate the running process, wait for it to fully exit,
+   * then spawn a fresh process with the same (or updated) parameters. The
+   * notification/status subscriptions persist across the restart (registered
+   * once in the constructor), so the sidebar views keep receiving events.
+   */
+  async restart(params: CreateParams): Promise<void> {
+    if (this._state === 'spawning') {
+      return;
+    }
+    this._state = 'spawning';
+    try {
+      await this.host.stopAndWait();
       await this.host.start(params);
       this._state = 'running';
     } catch (err) {

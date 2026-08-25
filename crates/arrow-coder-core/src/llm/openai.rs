@@ -451,7 +451,15 @@ impl OpenAIBackend {
             temperature,
             top_p: model.effective_top_p(),
             top_k: model.top_k,
-            presence_penalty: model.presence_penalty,
+            // Vendor capability: DeepSeek chat gateway rejects `presence_penalty`
+            // (and `frequency_penalty`). Skip the field entirely when the provider
+            // preset declares `rejects_penalty` (see §9.2 — capabilities sink from
+            // the preset into the backend, instead of being hardcoded here).
+            presence_penalty: if self.provider.rejects_penalty {
+                None
+            } else {
+                model.presence_penalty
+            },
             tools: tools.map(|t| self.convert_tools(t)),
             tool_choice: self.convert_tool_choice(tool_choice.as_ref()),
             max_tokens,

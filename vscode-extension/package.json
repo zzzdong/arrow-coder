@@ -57,6 +57,16 @@
         "command": "arrowCoder.addToChat",
         "title": "Add to Arrow Coder Chat",
         "icon": "$(comment)"
+      },
+      {
+        "command": "arrowCoder.restartServer",
+        "title": "Restart Arrow Coder Server",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "arrowCoder.openInEditor",
+        "title": "Open Chat in Editor",
+        "icon": "$(split-horizontal)"
       }
     ],
     "menus": {
@@ -68,6 +78,16 @@
         },
         {
           "command": "arrowCoder.toggleHistory",
+          "when": "view == arrowCoder.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "arrowCoder.restartServer",
+          "when": "view == arrowCoder.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "arrowCoder.openInEditor",
           "when": "view == arrowCoder.chatView",
           "group": "navigation"
         }

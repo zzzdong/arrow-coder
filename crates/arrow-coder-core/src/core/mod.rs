@@ -9,7 +9,7 @@ pub mod rewind;
 pub mod task;
 pub mod types;
 
-pub use config::{ConnectorConfig, McpServerConfig, ModelConfig, ProviderConfig, ToolConfig, ToolPermission, VibeConfig};
+pub use config::{McpServerConfig, ModelConfig, ProviderConfig, ToolConfig, ToolPermission, VibeConfig};
 pub use task::{ContextSnapshot, TaskGraph, TaskNode, TaskStatus};
 pub use error::{ArrowError, Result};
 pub use rewind::{Checkpoint, FileCheckpointer, FileSnapshot, RewindError, RewindManager};

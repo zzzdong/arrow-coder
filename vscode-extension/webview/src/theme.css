@@ -1,0 +1,124 @@
+/*
+ * Arrow Coder — semantic design tokens.
+ * All colors map to official `--vscode-*` variables. NO rgba()/hex hardcoding
+ * anywhere in the webview. Hover/active states reuse VS Code's own tokens so
+ * the UI follows the user's theme automatically.
+ */
+
+:root {
+  /* ---- Surfaces (backgrounds) ---- */
+  --bg: var(--vscode-sideBar-background, #1e1e1e);
+  --bg-panel: var(--vscode-editorWidget-background, #252526);
+  --bg-secondary: var(--vscode-sideBarSectionHeader-background, #2a2a2a);
+  --bg-elevated: var(--vscode-menu-background, #252526);
+  --bg-input: var(--vscode-input-background, #3c3c3c);
+  --bg-hover: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.06));
+  --bg-active: var(--vscode-list-activeSelectionBackground, #04395e);
+  --bg-selected: var(--vscode-list-inactiveSelectionBackground, #37373d);
+
+  /* ---- Text ---- */
+  --text: var(--vscode-foreground, #cccccc);
+  --text-muted: var(--vscode-descriptionForeground, #9d9d9d);
+  --text-secondary: var(--vscode-sideBar-foreground, #cccccc);
+  --text-inverse: var(--vscode-button-foreground, #ffffff);
+
+  /* ---- Accent / brand ---- */
+  --accent: var(--vscode-button-background, #0e639c);
+  --accent-hover: var(--vscode-button-hoverBackground, #1177bb);
+  --accent-foreground: var(--vscode-button-foreground, #ffffff);
+
+  /* ---- Borders / dividers ---- */
+  --border: var(--vscode-panel-border, #333333);
+  --border-strong: var(--vscode-contrastBorder, #454545);
+  --border-widget: var(--vscode-widget-border, #333333);
+
+  /* ---- Semantic status colors ---- */
+  --success: var(--vscode-charts-green, #4caf50);
+  --warn: var(--vscode-charts-yellow, #fb8c00);
+  --error: var(--vscode-charts-red, #f44336);
+  --info: var(--vscode-charts-blue, #4ec9b0);
+  --charts-purple: var(--vscode-charts-purple, #b180d7);
+  --charts-blue: var(--vscode-charts-blue, #4ec9b0);
+
+  /* ---- Input validation (permissions / sensitive fields) ---- */
+  --warning-border: var(--vscode-inputValidation-warningBorder, #d7a01e);
+
+  /* ---- Focus ring ---- */
+  --focus-border: var(--vscode-focusBorder, #007fd4);
+
+  /* ---- Typography ---- */
+  --font-ui: var(--vscode-font-family, -apple-system, "Segoe UI", sans-serif);
+  --font-mono: var(--vscode-editor-font-family, "Cascadia Code", "Fira Code", monospace);
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 14px;
+
+  /* ---- Radius / spacing ---- */
+  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-lg: 7px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+
+  /* ---- Shadows (use sparingly; prefer borders) ---- */
+  --shadow-popover: var(--vscode-widget-shadow, 0 4px 14px rgba(0, 0, 0, 0.35));
+}
+
+/* ---- Shared utility classes ---- */
+.ac-codicon {
+  font: normal normal normal 16px/1 codicon;
+  display: inline-block;
+  text-decoration: none;
+  text-rendering: auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+}
+
+.ac-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-family: var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s;
+}
+.ac-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+.ac-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ac-btn.ac-btn-primary {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  border-color: var(--accent);
+}
+.ac-btn.ac-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.ac-link {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.ac-link:hover {
+  text-decoration: underline;
+}
+
+.ac-muted {
+  color: var(--text-muted);
+}

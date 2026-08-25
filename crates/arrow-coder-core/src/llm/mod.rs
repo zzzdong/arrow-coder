@@ -23,11 +23,15 @@ pub fn init_backend(
     // either so pre-refactor configs keep working.
     let kind = provider_config.kind();
     match kind {
-        "openai" | "openai-compatible" => {
+        // `openai-chat` is the protocol-family id for the OpenAI chat-completions
+        // schema (used by OpenAI, openai_compatible, and local presets).
+        "openai-chat" => {
             let backend = openai::OpenAIBackend::new(provider_config.clone())?;
             Ok(Arc::new(backend))
         }
-        "deepseek" => {
+        // `deepseek-chat` is the OpenAI-chat *variant* with DeepSeek extensions
+        // (thinking object, prompt_cache_hit_tokens, rejects penalty).
+        "deepseek-chat" => {
             let backend = deepseek::DeepSeekChatBackend::new(provider_config.clone())?;
             Ok(Arc::new(backend))
         }
@@ -36,7 +40,7 @@ pub fn init_backend(
             Ok(Arc::new(backend))
         }
         other => Err(crate::core::ArrowError::Config(format!(
-            "Unknown backend: {}. Supported backends: openai, openai-compatible, anthropic, deepseek-chat, deepseek-responses",
+            "Unknown backend: {}. Supported backends: openai-chat, anthropic, deepseek-chat, deepseek-responses",
             other
         ))),
     }

@@ -1,58 +1,55 @@
-/* highlight.js token colors — a lightweight VS Code "dark+" inspired theme.
-   These are global because the markdown HTML is injected via v-html and its
-   child token spans are not reachable by scoped styles of MessageItem. */
-.hljs {
-  color: var(--vscode-editor-foreground, #d4d4d4);
-  background: transparent;
+/* Design tokens (semantic colors mapped to VS Code theme variables). */
+@import './theme.css';
+
+* {
+  box-sizing: border-box;
 }
-.hljs-comment,
-.hljs-quote {
-  color: #6a9955;
-  font-style: italic;
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
 }
-.hljs-keyword,
-.hljs-selector-tag,
-.hljs-built_in,
-.hljs-name,
-.hljs-tag {
-  color: #569cd6;
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--text);
+  background: var(--bg);
+  line-height: 1.5;
+  overflow: hidden;
 }
-.hljs-string,
-.hljs-title,
-.hljs-section,
-.hljs-attribute,
-.hljs-literal,
-.hljs-template-tag,
-.hljs-template-variable,
-.hljs-type,
-.hljs-addition {
-  color: #ce9178;
+
+/* The webview root fills the VS Code sidebar webview. */
+#app {
+  display: flex;
+  flex-direction: column;
 }
-.hljs-number,
-.hljs-symbol,
-.hljs-bullet,
-.hljs-link,
-.hljs-meta,
-.hljs-selector-id,
-.hljs-selector-class {
-  color: #b5cea8;
+
+/* Scrollbars follow the editor's theme. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
-.hljs-title.function_,
-.hljs-function .hljs-title {
-  color: #dcdcaa;
+::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4));
+  border-radius: 6px;
 }
-.hljs-attr,
-.hljs-variable,
-.hljs-property,
-.hljs-params {
-  color: #9cdcfe;
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, 0.7));
 }
-.hljs-deletion {
-  color: #f44747;
+
+/* Native form controls inherit the VS Code font. */
+button {
+  font-family: var(--font-ui);
 }
-.hljs-emphasis {
-  font-style: italic;
+code, pre {
+  font-family: var(--font-mono);
 }
-.hljs-strong {
-  font-weight: 700;
+
+/* vscode-elements controls should span available width where appropriate. */
+vscode-text-field,
+vscode-text-area,
+vscode-single-select {
+  width: 100%;
 }

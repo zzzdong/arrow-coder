@@ -2,8 +2,12 @@
   <div v-if="store.todos.length > 0" class="todo-panel">
     <!-- Header: collapsible summary strip -->
     <div class="tp-header" @click="expanded = !expanded">
-      <span class="tp-toggle">{{ expanded ? '▼' : '▶' }}</span>
-      <span class="tp-title">{{ allDone ? '✓ 任务全部完成' : '任务清单' }}</span>
+      <span class="ac-codicon tp-toggle" :class="{ open: expanded }">&#xeab6;</span>
+      <span class="tp-title">
+        <span v-if="allDone" class="ac-codicon tp-done">&#xea71;</span>
+        <template v-else>任务清单</template>
+        <template v-if="allDone">任务全部完成</template>
+      </span>
       <span class="tp-counts">
         <span v-if="stats.pending" class="tp-n">{{ stats.pending }} 待办</span>
         <span v-if="stats.inProgress" class="tp-n tp-in">{{ stats.inProgress }} 进行中</span>
@@ -115,13 +119,17 @@ function statusIcon(s: string): string {
   transition: background 0.15s;
 }
 .tp-header:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
 }
 .tp-toggle {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   width: 14px;
   text-align: center;
+  transition: transform 0.15s;
+}
+.tp-toggle.open {
+  transform: rotate(90deg);
 }
 .tp-title {
   font-weight: 600;
@@ -134,8 +142,8 @@ function statusIcon(s: string): string {
   font-size: 11px;
 }
 .tp-n { color: var(--text-muted); }
-.tp-in { color: var(--vscode-charts-blue, #4af); }
-.tp-done { color: var(--success, #4caf50); }
+.tp-in { color: var(--info); }
+.tp-done { color: var(--success); }
 
 .tp-body {
   border-top: 1px solid var(--border);
@@ -151,7 +159,7 @@ function statusIcon(s: string): string {
   transition: background 0.12s;
 }
 .tp-item:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
 }
 .tp-status {
   width: 16px;
@@ -159,8 +167,8 @@ function statusIcon(s: string): string {
   flex-shrink: 0;
 }
 .tp-pending .tp-status { color: var(--text-muted); }
-.tp-in_progress .tp-status { color: var(--vscode-charts-blue, #4af); }
-.tp-completed .tp-status { color: var(--success, #4caf50); }
+.tp-in_progress .tp-status { color: var(--vscode-charts-blue, var(--info)); }
+.tp-completed .tp-status { color: var(--success); }
 .tp-content {
   flex: 1;
   min-width: 0;
@@ -180,9 +188,9 @@ function statusIcon(s: string): string {
   border-radius: 3px;
   flex-shrink: 0;
 }
-.tp-p-high { color: #e53935; background: rgba(229, 57, 53, 0.15); }
-.tp-p-medium { color: #fb8c00; background: rgba(251, 140, 0, 0.15); }
-.tp-p-low { color: #8bc34a; background: rgba(139, 195, 74, 0.15); }
+.tp-p-high { color: var(--error); background: var(--bg-hover); }
+.tp-p-medium { color: var(--warn); background: var(--bg-hover); }
+.tp-p-low { color: var(--success); background: var(--bg-hover); }
 .tp-actions {
   display: flex;
   gap: 4px;
@@ -200,6 +208,6 @@ function statusIcon(s: string): string {
   transition: all 0.12s;
 }
 .tp-btn:hover { border-color: var(--accent); }
-.tp-btn-primary { color: var(--vscode-charts-blue, #4af); }
-.tp-btn-done { color: var(--success, #4caf50); }
+.tp-btn-primary { color: var(--vscode-charts-blue, var(--info)); }
+.tp-btn-done { color: var(--success); }
 </style>

@@ -1,126 +1,106 @@
-<template>
-  <div class="toolbar">
-    <button class="tb-icon" title="Mention a file or context" @click="mention">＠</button>
-    <button class="tb-icon" title="Attach a file" @click="attach">📎</button>
-    <button class="tb-icon" title="Insert code context" @click="insertCode">📄</button>
-
-    <span class="tb-sep" />
-
-    <!-- Model selector -->
-    <div class="tb-model" :class="{ open: showModelMenu }">
-      <button class="tb-icon tb-model-btn" @click="showModelMenu = !showModelMenu">
-        {{ modelLabel }} ▾
-      </button>
-      <div v-if="showModelMenu" class="tb-menu">
-        <button
-          v-for="[id, label] in models"
-          :key="id"
-          class="tb-menu-item"
-          :class="{ active: id === store.model }"
-          @click="selectModel(id, label)"
-        >{{ label }}</button>
-      </div>
-    </div>
-
-    <button class="tb-icon" title="Skills" @click="openSkills">Skills</button>
-
-    <span class="tb-sep" />
-    <button class="tb-icon" title="模型配置" @click="$emit('settings')">⚙</button>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { useChatStore } from '../stores/chat';
 
 const store = useChatStore();
-const emit = defineEmits<{ settings: [] }>();
-const showModelMenu = ref(false);
 
-const models = computed(() => store.config?.models ?? []);
-const modelLabel = computed(() => {
-  const pair = models.value.find(([id]) => id === store.model);
-  return pair ? pair[1] : store.model || '选择模型';
-});
+const emit = defineEmits<{
+  (e: 'toggle-history'): void;
+  (e: 'open-settings'): void;
+}>();
 
-function mention() {
-  store.appendDraft('@');
+// Show a compact "Resumed" pill when the current session was auto-resumed.
+const resumed = computed(() => store.resumedSession);
+
+function onNewSession() {
+  store.newSession();
 }
-function attach() {
-  store.appendDraft('📎');
+function onClear() {
+  store.clearMessages();
 }
-function insertCode() {
-  store.appendDraft('```\n\n```');
+function onToggleHistory() {
+  emit('toggle-history');
 }
-async function selectModel(id: string, _label: string) {
-  showModelMenu.value = false;
-  await store.reconfigure(id, store.effort);
-}
-function openSkills() {
-  store.appendDraft('/skill ');
+function onOpenSettings() {
+  emit('open-settings');
 }
 </script>
+
+<template>
+  <div class="toolbar">
+    <div class="tb-left">
+      <button class="tb-btn" title="新会话" @click="onNewSession">
+        <span class="ac-codicon">&#xea60;</span>
+      </button>
+      <button class="tb-btn" title="清空对话" @click="onClear">
+        <span class="ac-codicon">&#xea76;</span>
+      </button>
+    </div>
+
+    <div class="tb-center">
+      <span v-if="resumed" class="tb-resumed" title="已从断点恢复">
+        <span class="ac-codicon">&#xea73;</span> 已恢复
+      </span>
+    </div>
+
+    <div class="tb-right">
+      <button class="tb-btn" title="会话历史" @click="onToggleHistory">
+        <span class="ac-codicon">&#xea6e;</span>
+      </button>
+      <button class="tb-btn" title="设置" @click="onOpenSettings">
+        <span class="ac-codicon">&#xea76;</span>
+      </button>
+    </div>
+  </div>
+</template>
 
 <style scoped>
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   padding: 4px 8px;
-  background: rgba(127,127,127,.02);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--bg);
 }
-.tb-icon {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--vscode-foreground, #ddd);
-  cursor: pointer;
-  font-size: 13px;
-  padding: 2px 7px;
-  border-radius: 5px;
-  line-height: 1.4;
-  white-space: nowrap;
-}
-.tb-icon:hover {
-  background: rgba(255,255,255,.08);
-  border-color: var(--vscode-panel-border, #333);
-}
-.tb-sep {
-  flex: 1;
-}
-.tb-model {
-  position: relative;
-}
-.tb-model-btn {
-  font-size: 12px;
-}
-.tb-menu {
-  position: absolute;
-  bottom: 110%;
-  right: 0;
-  min-width: 150px;
-  background: var(--vscode-dropdown-background, #252526);
-  border: 1px solid var(--vscode-panel-border, #333);
-  border-radius: 6px;
-  padding: 4px;
-  z-index: 20;
+.tb-left,
+.tb-right {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 2px;
 }
-.tb-menu-item {
-  background: transparent;
+.tb-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+.tb-btn {
+  background: none;
   border: none;
-  color: var(--vscode-foreground, #ddd);
+  color: var(--text-muted);
   cursor: pointer;
-  text-align: left;
-  font-size: 12px;
-  padding: 4px 8px;
-  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: background 0.12s, color 0.12s;
 }
-.tb-menu-item:hover {
-  background: rgba(255,255,255,.08);
+.tb-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
-.tb-menu-item.active {
-  background: rgba(0,120,212,.25);
+.tb-resumed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--warn);
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  padding: 1px 8px;
 }
 </style>

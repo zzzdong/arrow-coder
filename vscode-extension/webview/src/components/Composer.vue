@@ -1,579 +1,494 @@
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue';
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useChatStore } from '../stores/chat';
 import { rpc } from '../rpc';
 import ContextMeter from './ContextMeter.vue';
+import UsageBar from './UsageBar.vue';
+import ModelPill from './ModelPill.vue';
 
 const store = useChatStore();
 
-// ---- Turn-level "still working" status (harness `TurnStatus` parity) --------
-// A single status line that rides the whole running turn — first-token wait,
-// tool execution, and streaming — so it never flickers per step. It shows a
-// phase label (thinking vs. running a tool vs. processing) and, once the turn
-// has clearly been running a while (>=15s, harness threshold), a live clock so
-// the user can see the agent is still making progress.
-const PHASE_CLOCK_THRESHOLD_MS = 15_000;
-
-// Whether any tool invocation is currently running: a tool card was opened by a
-// `tool_call` but has not yet received its `tool_result`. Mirrors how a
-// long-running shell/bash call would otherwise look identical to an idle wait.
-const anyToolRunning = computed(() =>
-  store.messages.some(
-    (m) =>
-      m.role === 'tool' &&
-      m.tool !== undefined &&
-      m.tool.result === undefined &&
-      m.tool.error === undefined,
-  ),
-);
-
-// Phase label inferred from the live stream + tool state (harness keeps one
-// "Deep diving..." label across phases; we surface the phase so the user can
-// tell "waiting on the model" from "running a long tool").
-const phaseLabel = computed(() => {
-  if (anyToolRunning.value) return '执行工具中…';
-  if (store.thinkStreamActive) return '思考中…';
-  return '正在处理…';
+const text = computed({
+  get: () => store.draft,
+  set: (v: string) => (store.draft = v),
 });
+const taRef = ref<HTMLTextAreaElement | null>(null);
+const fileRefs = ref<string[]>([]); // @-mentioned file paths, sent as references
+const busy = computed(() => store.busy);
+const placeholder = '询问任何问题，或输入 / 选择技能…';
 
-// Live elapsed clock, updated once per second while busy.
-const elapsedMs = ref(0);
-let timer: ReturnType<typeof setInterval> | null = null;
-function startClock() {
-  stopClock();
-  elapsedMs.value = Date.now() - (store.turnStartTime || Date.now());
-  timer = setInterval(() => {
-    elapsedMs.value = Date.now() - (store.turnStartTime || Date.now());
-  }, 1000);
+let composing = false;
+
+function onCompositionStart() {
+  composing = true;
 }
-function stopClock() {
-  if (timer !== null) {
-    clearInterval(timer);
-    timer = null;
-  }
-  elapsedMs.value = 0;
-}
-watch(
-  () => store.busy,
-  (busy) => {
-    if (busy) startClock();
-    else stopClock();
-  },
-  { immediate: true },
-);
-onUnmounted(stopClock);
-
-function fmtClock(ms: number): string {
-  const total = Math.floor(ms / 1000);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${s.toString().padStart(2, '0')}`;
-}
-const showClock = computed(() => elapsedMs.value >= PHASE_CLOCK_THRESHOLD_MS);
-
-// Slash-commands: locally handled actions (never sent to the LLM as a prompt).
-// Aligns with harness's slash-command lifecycle (`/compact`, ...).
-// Slash-commands come from the core registry via `store.commands` (single
-// source of truth; mirrored with the CLI). `label`/`desc` are derived for the
-// completion popover.
-interface SlashCommandView {
-  name: string;
-  label: string;
-  desc: string;
-}
-const commandList = computed<SlashCommandView[]>(() =>
-  store.commands.map((c) => ({ name: c.name, label: `/${c.name}`, desc: c.description })),
-);
-
-// IME guard (harness: InputBar triple-protection). While a CJK composition is
-// active we must NOT send on Enter; Shift+Enter newline also defers to the
-// composition so the user can confirm a candidate with Enter.
-const composingRef = ref(false);
-
-async function send() {
-  const raw = store.draft;
-  const content = raw.trim();
-  if (!content || store.busy) return;
-  // Slash-command? Run it locally instead of sending to the LLM.
-  if (content.startsWith('/')) {
-    const name = content.slice(1).split(/\s+/)[0];
-    if (commandList.value.some((c) => c.name === name)) {
-      store.draft = '';
-      closeSuggestions();
-      closeRefs();
-      store.runCommand(name);
-      return;
-    }
-  }
-  closeRefs();
-  closeSuggestions();
-  // Roll back the draft on send failure so the user keeps their text
-  // (harness: onSubmitSettled restores the draft when submission fails).
-  const backup = store.draft;
-  store.draft = '';
-  try {
-    // The UI only collects `@`-referenced paths; the CORE reads and expands
-    // them into inline content (shared with the CLI).
-    await store.sendPrompt(content, collectReferences(content));
-  } catch {
-    if (!store.draft.trim()) store.draft = backup;
-  }
+function onCompositionEnd() {
+  composing = false;
 }
 
-
-// -- File/dir reference (@) completion + injection ---------------------------
-// Entries returned by `workspace/readFile list`; `refParent` is the directory
-// currently being listed, `refCwd` is the workspace root used as the base for
-// resolving relative `@` paths.
-interface RefEntry {
-  name: string;
-  path: string;
-  isDir: boolean;
-}
-const refSuggestions = ref<RefEntry[]>([]);
-const refParent = ref<string | null>(null);
-
-function closeRefs() {
-  refSuggestions.value = [];
-  refParent.value = null;
+function autoResize() {
+  const ta = taRef.value;
+  if (!ta) return;
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 180) + 'px';
 }
 
-/** Detect the last `@...` token (a reference being typed) in the draft. */
-function pendingRefToken(draft: string): string | null {
-  const m = draft.match(/(^|\s)@([^\s]*)$/);
-  return m ? m[2] : null;
+function onInput() {
+  autoResize();
 }
 
-async function updateRefs(draft: string) {
-  const tok = pendingRefToken(draft);
-  if (tok === null) {
-    closeRefs();
-    return;
-  }
-  const base = store.activeTab?.workspacePath ?? '';
-  const dir = refParent.value ?? base;
-  try {
-    const res = (await rpc.request('workspace/readFile', { path: dir, mode: 'list' })) as
-      | { ok: boolean; entries?: RefEntry[] }
-      | undefined;
-    if (!res || !res.ok || !res.entries) {
-      refSuggestions.value = [];
-      return;
-    }
-    const q = tok;
-    refSuggestions.value = res.entries.filter((e) => e.name.toLowerCase().startsWith(q.toLowerCase())).slice(0, 20);
-  } catch {
-    refSuggestions.value = [];
-  }
+async function submit() {
+  const content = text.value.trim();
+  if (!content || busy.value) return;
+  const refs = fileRefs.value.slice();
+  text.value = '';
+  fileRefs.value = [];
+  await store.sendPrompt(content, refs);
+  nextTick(() => {
+    if (taRef.value) taRef.value.style.height = 'auto';
+  });
 }
 
-/** Enter a directory in the reference picker. */
-async function enterDir(entry: RefEntry) {
-  if (!entry.isDir) return;
-  refParent.value = entry.path;
-  await updateRefs(`${store.draft} @`);
-}
-
-/** Replace the trailing `@token` with the selected reference. */
-function applyRef(entry: RefEntry) {
-  const tok = pendingRefToken(store.draft);
-  if (tok === null) return;
-  const pos = store.draft.lastIndexOf('@');
-  store.draft = store.draft.slice(0, pos) + `@${entry.path} `;
-  closeRefs();
-  focusInput();
-}
-
-/**
- * Collect `@path` references from a message body. The UI only passes the paths —
- * the CORE reads the referenced files and expands them into inline content.
- */
-function collectReferences(content: string): string[] {
-  const refs = new Set<string>();
-  for (const m of content.matchAll(/@([^\s,，]+)/g)) {
-    const p = m[1];
-    if (p && !p.includes('/@')) refs.add(p);
-  }
-  return [...refs];
-}
-
-// -- Command suggestion popover --
-const suggestions = ref<SlashCommandView[]>([]);
-function closeSuggestions() {
-  suggestions.value = [];
-}
-function updateSuggestions(value: string) {
-  if (!value.startsWith('/')) {
-    suggestions.value = [];
-    return;
-  }
-  const q = value.slice(1).split(/\s+/)[0];
-  suggestions.value = commandList.value.filter((c) => c.name.startsWith(q)).slice(0, 4);
-}
-function onInput(e: Event) {
-  const v = (e.target as HTMLTextAreaElement).value;
-  store.draft = v;
-  updateSuggestions(v);
-  void updateRefs(v);
-}
-function applySuggestion(c: SlashCommandView) {
-  store.draft = `/${c.name} `;
-  updateSuggestions(`/${c.name} `);
-  focusInput();
-}
-function onKey(e: KeyboardEvent) {
-  // IME triple-protection (harness: InputBar). While a CJK composition is
-  // active the Enter key confirms a candidate, not a submit. We also guard the
-  // raw `keyCode === 229` emitted by some IME engines, and never allow a held
-  // Enter to auto-repeat submissions.
-  const imeActive = composingRef.value || e.isComposing || e.keyCode === 229;
-  if (e.key === 'Enter') {
-    // Shift+Enter must insert a newline first — even mid-composition the user
-    // can break lines; only a plain Enter is intercepted for send.
-    if (e.shiftKey) return;
-    if (imeActive || e.repeat) {
-      e.preventDefault();
-      return;
-    }
+function onKeydown(e: KeyboardEvent) {
+  // IME guard: ignore Enter while composing.
+  if (e.key === 'Enter' && !e.isComposing && !composing) {
+    if (e.shiftKey) return; // newline
     e.preventDefault();
-    // File reference completion: apply the single match instead of sending.
-    if (refSuggestions.value.length === 1) {
-      applyRef(refSuggestions.value[0]);
-      return;
-    }
-    // Slash-command completion: complete the single match instead of sending.
-    if (suggestions.value.length === 1 && store.draft.trim() !== suggestions.value[0].label) {
-      applySuggestion(suggestions.value[0]);
-      return;
-    }
-    void send();
-  } else if (e.key === 'Escape') {
-    closeSuggestions();
-    closeRefs();
-  } else if (e.key === 'Tab') {
-    if (refSuggestions.value.length > 0) {
-      e.preventDefault();
-      applyRef(refSuggestions.value[0]);
-    } else if (suggestions.value.length > 0) {
-      e.preventDefault();
-      applySuggestion(suggestions.value[0]);
-    }
+    void submit();
+    return;
+  }
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    void submit();
+  }
+  if (e.key === 'Escape' && store.pendingPermission) {
+    store.dismissPermission();
   }
 }
 
-// -- @reference highlight (mirror backdrop) -----------------------------------
-// Split the draft into plain / reference segments so the backdrop layer can
-// paint `@path` tokens. Harness keeps this in a transparent mirror under the
-// textarea rather than mutating the editable content.
-interface MirrorSeg {
-  text: string;
-  cls: string;
+function removeFileRef(idx: number) {
+  fileRefs.value.splice(idx, 1);
 }
-const mirrorSegments = computed<MirrorSeg[]>(() => {
-  const parts = store.draft.split(/(@[^\s,，]+)/g);
-  return parts.map((p) => ({
-    text: p,
-    cls: p.startsWith('@') ? 'ref' : 'plain',
-  }));
+
+function cancel() {
+  store.cancel();
+}
+
+// ---- Slash command menu ----
+interface SlashCmd {
+  name: string;
+  description: string;
+}
+const slashOpen = ref(false);
+const slashQuery = ref('');
+const slashActive = ref(0);
+const slashCmds = ref<SlashCmd[]>([]);
+
+const filteredSlash = computed(() => {
+  const q = slashQuery.value.toLowerCase();
+  if (!q) return slashCmds.value;
+  return slashCmds.value.filter((c) => c.name.toLowerCase().includes(q));
 });
-async function stop() {
-  await store.cancel();
+
+async function loadSlash() {
+  try {
+    const res = await rpc.request('skills/list', {}) as { skills: SlashCmd[] } | undefined;
+    slashCmds.value = (res?.skills ?? []).map((s) => ({ name: s.name, description: s.description }));
+  } catch {
+    slashCmds.value = [];
+  }
 }
 
-const inputEl = ref<HTMLTextAreaElement | null>(null);
-function focusInput() {
-  inputEl.value?.focus();
+function detectSlash() {
+  const v = text.value;
+  const m = /(^|\s)\/([\p{L}\p{N}_-]*)$/u.exec(v);
+  if (m) {
+    slashQuery.value = m[2];
+    slashOpen.value = true;
+    slashActive.value = 0;
+  } else {
+    slashOpen.value = false;
+  }
 }
 
+watch(text, () => {
+  detectSlash();
+  onInput();
+});
+
+function applySlash(cmd: SlashCmd) {
+  const v = text.value;
+  const m = /(^|\s)\/[\p{L}\p{N}_-]*$/u.exec(v);
+  if (m) {
+    const prefix = v.slice(0, m.index) + (m[1] ? m[1] : '');
+    text.value = prefix + '/' + cmd.name + ' ';
+  } else {
+    text.value = '/' + cmd.name + ' ';
+  }
+  slashOpen.value = false;
+  nextTick(() => taRef.value?.focus());
+}
+
+function onSlashKey(e: KeyboardEvent) {
+  if (!slashOpen.value) return;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    slashActive.value = (slashActive.value + 1) % filteredSlash.value.length;
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    slashActive.value = (slashActive.value - 1 + filteredSlash.value.length) % filteredSlash.value.length;
+  } else if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !composing)) {
+    if (filteredSlash.value[slashActive.value]) {
+      e.preventDefault();
+      applySlash(filteredSlash.value[slashActive.value]);
+    }
+  } else if (e.key === 'Escape') {
+    slashOpen.value = false;
+  }
+}
+
+// ---- @ reference menu ----
+interface RefItem {
+  path: string;
+}
+const atOpen = ref(false);
+const atQuery = ref('');
+const atActive = ref(0);
+const atItems = ref<RefItem[]>([]);
+
+const filteredAt = computed(() => {
+  const q = atQuery.value.toLowerCase();
+  if (!q) return atItems.value.slice(0, 8);
+  return atItems.value.filter((r) => r.path.toLowerCase().includes(q)).slice(0, 8);
+});
+
+let atTokenStart = -1;
+function detectAt() {
+  const v = text.value;
+  const m = /(^|\s)@([\p{L}\p{N}_\-/./]*)$/u.exec(v);
+  if (m) {
+    atQuery.value = m[2];
+    atTokenStart = m.index + m[1].length;
+    atOpen.value = true;
+    atActive.value = 0;
+    void loadAt();
+  } else {
+    atOpen.value = false;
+  }
+}
+
+async function loadAt() {
+  try {
+    const res = await rpc.request('workspace/search', { query: atQuery.value }) as
+      | { items: RefItem[] }
+      | undefined;
+    atItems.value = res?.items ?? [];
+  } catch {
+    atItems.value = [];
+  }
+}
+
+function applyAt(item: RefItem) {
+  const v = text.value;
+  const before = v.slice(0, atTokenStart);
+  const after = v.slice(atTokenStart).replace(/^@[\p{L}\p{N}_\-/./]*/, '');
+  text.value = before + '@' + item.path + ' ' + after;
+  atOpen.value = false;
+  // Track the referenced path for sending.
+  if (!fileRefs.value.includes(item.path)) fileRefs.value.push(item.path);
+  nextTick(() => taRef.value?.focus());
+}
+
+function onAtKey(e: KeyboardEvent) {
+  if (!atOpen.value) return;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    atActive.value = (atActive.value + 1) % Math.max(filteredAt.value.length, 1);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    atActive.value = (atActive.value - 1 + filteredAt.value.length) % Math.max(filteredAt.value.length, 1);
+  } else if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !composing)) {
+    if (filteredAt.value[atActive.value]) {
+      e.preventDefault();
+      applyAt(filteredAt.value[atActive.value]);
+    }
+  } else if (e.key === 'Escape') {
+    atOpen.value = false;
+  }
+}
+
+watch(text, detectAt);
+
+onMounted(() => {
+  autoResize();
+  loadSlash();
+});
+onBeforeUnmount(() => {});
+
+const canSend = computed(() => text.value.trim().length > 0 && !busy.value);
+
+// Model list for the pill (from config.models: [id, label][])
+const models = computed(() =>
+  (store.config?.models ?? []).map(([id, label]) => ({ id, label }))
+);
+const currentModel = computed(() => store.model);
+// Whether the active model advertises reasoning support (from config.full.models).
+const supportsThinking = computed(() => {
+  const full = store.config?.full?.models ?? [];
+  const m = full.find((x) => x.id === store.model);
+  return Boolean(m?.thinking);
+});
+function selectModel(id: string) {
+  void store.reconfigure(id, store.effort ?? '');
+}
+function setEffort(tier: string) {
+  void store.reconfigure(store.model, tier);
+}
 </script>
 
 <template>
-  <div class="inputbar">
-    <!-- Turn-level "still working" status (harness TurnStatus parity): rides the
-         whole running turn so it never flickers per step; shows the phase and,
-         once long-running (>=15s), a live elapsed clock. -->
-    <div v-if="store.busy && !store.pendingPermission && !store.pendingQuestion" class="work-status" role="status" aria-live="polite">
-      <span class="ws-spinner" aria-hidden="true" />
-      <span class="ws-phase">{{ phaseLabel }}</span>
-      <span v-if="showClock" class="ws-clock" aria-hidden="true">{{ fmtClock(elapsedMs) }}</span>
+  <div class="composer">
+    <div class="composer-top">
+      <ModelPill
+        :models="models"
+        :current="currentModel"
+        :thinking="supportsThinking"
+        :effort="store.effort ?? ''"
+        @select="selectModel"
+        @set-effort="setEffort"
+      />
+      <span class="composer-spacer"></span>
+      <ContextMeter v-if="store.usage" />
     </div>
 
-    <!-- Multi-line input area (bound to shared draft so the input toolbar can insert) -->
     <div class="input-wrap">
-      <!-- Slash-command completion popover -->
-      <div v-if="suggestions.length > 0" class="cmd-suggest">
-        <button
-          v-for="c in suggestions"
+      <div v-if="fileRefs.length" class="file-refs">
+        <span v-for="(f, i) in fileRefs" :key="i" class="file-ref">
+          <span class="ac-codicon">&#xea89;</span>{{ f }}
+          <button class="fr-x" @click="removeFileRef(i)" title="移除">×</button>
+        </span>
+      </div>
+
+      <div class="ta-row">
+        <textarea
+          ref="taRef"
+          v-model="text"
+          class="ta"
+          :placeholder="placeholder"
+          rows="1"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
+          @input="onInput"
+          @keydown="onKeydown"
+          @keyup.down="onAtKey"
+          @keydown.down="onAtKey"
+          @keyup.up="onAtKey"
+          @keydown.up="onAtKey"
+          @keydown.tab="onAtKey"
+          @keydown.escape="onAtKey"
+        ></textarea>
+
+        <div class="send-col">
+          <button v-if="!busy" class="send-btn" :disabled="!canSend" title="发送 (Enter)" @click="submit">
+            <span class="ac-codicon">&#xeb1d;</span>
+          </button>
+          <button v-else class="send-btn stop" title="停止 (Esc)" @click="cancel">
+            <span class="ac-codicon">&#xea79;</span>
+          </button>
+        </div>
+      </div>
+
+      <div v-if="slashOpen && filteredSlash.length" class="slash-menu">
+        <div
+          v-for="(c, i) in filteredSlash"
           :key="c.name"
-          class="cmd-item"
-          @mousedown.prevent="applySuggestion(c)"
-          @mouseenter="store.draft = `/${c.name}`; updateSuggestions(`/${c.name}`)"
+          class="slash-item"
+          :class="{ active: i === slashActive }"
+          @mousedown.prevent="applySlash(c)"
+          @mouseenter="slashActive = i"
         >
-          <span class="cmd-label">{{ c.label }}</span>
-          <span class="cmd-desc">{{ c.desc }}</span>
-        </button>
+          <span class="slash-name">/{{ c.name }}</span>
+          <span class="slash-desc">{{ c.description }}</span>
+        </div>
       </div>
-      <!-- File/directory reference completion popover (@) -->
-      <div v-if="refSuggestions.length > 0" class="cmd-suggest">
-        <button
-          v-if="refParent"
-          class="cmd-item"
-          @mousedown.prevent="refParent = null; updateRefs(store.draft + ' @')"
-        >
-          <span class="cmd-label">↰</span>
-          <span class="cmd-desc">上级目录</span>
-        </button>
-        <button
-          v-for="r in refSuggestions"
+
+      <div v-if="atOpen && filteredAt.length" class="slash-menu">
+        <div
+          v-for="(r, i) in filteredAt"
           :key="r.path"
-          class="cmd-item"
-          @mousedown.prevent="r.isDir ? enterDir(r) : applyRef(r)"
+          class="slash-item"
+          :class="{ active: i === atActive }"
+          @mousedown.prevent="applyAt(r)"
+          @mouseenter="atActive = i"
         >
-          <span class="cmd-label">{{ r.isDir ? '📁' : '📄' }} {{ r.name }}</span>
-          <span class="cmd-desc">{{ r.path }}</span>
-        </button>
+          <span class="ac-codicon slash-ico">&#xea89;</span>
+          <span class="slash-name">{{ r.path }}</span>
+        </div>
       </div>
-      <!-- Backdrop mirror: a read-only layer behind the transparent textarea
-           that highlights `@references` (harness mirror-layer technique) without
-           turning the textarea into a contenteditable. -->
-      <div class="mirror" aria-hidden="true">
-        <span v-for="(seg, i) in mirrorSegments" :key="i" :class="seg.cls">{{ seg.text }}</span>
-      </div>
-      <textarea
-        ref="inputEl"
-        class="input"
-        :value="store.draft"
-        rows="3"
-        :disabled="!store.ready"
-        placeholder="提问，输入 @ 引用文件，或 / 快捷命令"
-        inputmode="text"
-        @input="onInput"
-        @keydown="onKey"
-        @compositionstart="composingRef = true"
-        @compositionend="composingRef = false"
-      ></textarea>
     </div>
 
-    <!-- Bottom action bar (harness seats: left = plan/context, right = send/stop) -->
-    <div class="actions">
-      <!-- Left group: the context ring seats here (harness ContextMeter parity). -->
-      <div class="actions-left">
-        <ContextMeter />
-      </div>
-
-      <!-- Right group: send/stop. Stop only shows while busy so the
-           send button is the resting primary (harness Send↔Stop swap). -->
-      <div class="actions-right">
-        <button
-          v-if="store.busy"
-          class="act-btn act-stop"
-          title="Stop current turn"
-          @click="stop"
-        >⏹</button>
-        <button
-          v-else
-          class="act-btn act-send"
-          :disabled="!store.ready || !store.draft.trim()"
-          title="Send message (Enter)"
-          @click="send"
-        >▲</button>
-      </div>
+    <div class="composer-foot">
+      <UsageBar v-if="store.usage" />
+      <span class="composer-hint">Enter 发送 · Shift+Enter 换行 · / 技能 · @ 文件</span>
     </div>
   </div>
 </template>
 
 <style scoped>
-.inputbar {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
+.composer {
+  border-top: 1px solid var(--border);
+  background: var(--bg);
   padding: 8px 10px 6px;
-  border-top: 1px solid var(--vscode-panel-border, #333);
-  background: rgba(127,127,127,.02);
-}
-
-/* ---- Turn-level "still working" status (harness TurnStatus parity) ---- */
-.work-status {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 16px;
-  font-size: 12px;
-  color: var(--vscode-descriptionForeground, #999);
-  padding: 0 1px;
-}
-.ws-spinner {
-  width: 11px;
-  height: 11px;
-  border: 2px solid var(--vscode-progressBar-background, rgba(120,120,120,0.25));
-  border-top-color: var(--vscode-progressBar-background, #4ec9b0);
-  border-radius: 50%;
-  animation: ws-spin 0.8s linear infinite;
   flex-shrink: 0;
 }
-@keyframes ws-spin {
-  to { transform: rotate(360deg); }
+.composer-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
 }
-.ws-phase {
-  font-weight: 500;
-}
-.ws-clock {
-  margin-left: 2px;
-  font-variant-numeric: tabular-nums;
-  color: var(--vscode-descriptionForeground, #999);
+.composer-spacer {
+  flex: 1;
 }
 .input-wrap {
-  position: relative;
+  border: 1px solid var(--border-widget);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  padding: 6px 8px;
+  transition: border-color 0.12s;
 }
-.cmd-suggest {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 100%;
-  margin-bottom: 4px;
-  max-height: 180px;
-  overflow-y: auto;
-  background: var(--vscode-editorWidget-background, #252526);
-  border: 1px solid var(--vscode-focusBorder, #0078d4);
-  border-radius: 6px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
-  z-index: 30;
+.input-wrap:focus-within {
+  border-color: var(--focus-border);
 }
-.cmd-item {
+.file-refs {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
-  width: 100%;
-  padding: 6px 10px;
-  border: none;
-  background: transparent;
-  color: var(--vscode-foreground, #ddd);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-.cmd-item:hover {
-  background: var(--vscode-list-hoverBackground, rgba(255,255,255,.06));
-}
-.cmd-label {
-  font-weight: 600;
-  color: var(--vscode-textLink-foreground, #4af);
-  flex-shrink: 0;
-}
-.cmd-desc {
-  color: var(--vscode-descriptionForeground, #999);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.input {
-  width: 100%;
-  resize: vertical;
-  min-height: 52px;
-  max-height: 180px;
-  background: transparent;
-  color: var(--vscode-foreground, #ddd);
-  border: 1px solid var(--vscode-panel-border, #333);
-  border-radius: 7px;
-  padding: 7px 10px;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.45;
-  outline: none;
-  box-sizing: border-box;
-  position: relative;
-  z-index: 2;
-}
-.input:focus {
-  border-color: var(--vscode-focusBorder, #0078d4);
-}
-.input::placeholder {
-  opacity: 0.4;
-}
-
-/* Backdrop mirror: shares the textarea's box so `@references` are painted in
-   a highlight color; the textarea on top is transparent. */
-.mirror {
-  position: absolute;
-  inset: 7px 10px;
-  z-index: 1;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.45;
-  padding: 0;
-  margin: 0;
-  border: 0;
-  white-space: pre-wrap;
-  overflow: hidden;
-  pointer-events: none;
-  color: transparent;
-  word-break: break-word;
-}
-.mirror .ref {
-  color: var(--vscode-textLink-foreground, #4af);
-  background: rgba(74, 170, 255, 0.14);
-  border-radius: 3px;
-}
-
-/* ---- Action bar ---- */
-.actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 6px;
+  margin-bottom: 6px;
 }
-.actions-left,
-.actions-right {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.act-btn {
-  background: transparent;
-  border: 1px solid var(--vscode-panel-border, #333);
-  color: var(--vscode-foreground, #ddd);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 2px 9px;
-  border-radius: 5px;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-.act-btn:hover:not(:disabled) {
-  background: rgba(255,255,255,.08);
-}
-.act-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
-/* Send button stands out */
-.act-send {
-  font-weight: 700;
-  font-size: 14px;
-  padding: 2px 11px;
-}
-.act-send:hover:not(:disabled) {
-  background: rgba(0,120,212,.18);
-  border-color: var(--vscode-focusBorder,#0078d4);
-}
-
-/* Plan-mode chip: shown only while planning is active (harness PlanModeControl) */
-.act-chip {
+.file-ref {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
-  padding: 2px 9px;
-  border-radius: 12px;
-  border: 1px solid var(--vscode-focusBorder, #0078d4);
-  background: rgba(0,120,212,.16);
-  color: var(--vscode-foreground, #ddd);
-  cursor: pointer;
-  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--info);
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
 }
-.act-chip:hover {
-  background: rgba(0,120,212,.28);
+.fr-x {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.fr-x:hover {
+  color: var(--error);
+}
+.ta-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.ta {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  max-height: 180px;
+  width: 100%;
+}
+.ta::placeholder {
+  color: var(--text-muted);
+}
+.send-col {
+  flex-shrink: 0;
+}
+.send-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: background 0.12s, opacity 0.12s;
+}
+.send-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.send-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.send-btn.stop {
+  background: var(--error);
+}
+.slash-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 4px;
+  width: 280px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-widget);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-popover);
+  z-index: 25;
+}
+.slash-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.slash-item.active,
+.slash-item:hover {
+  background: var(--bg-hover);
+}
+.slash-name {
+  color: var(--text);
+  font-weight: 500;
+}
+.slash-desc {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+.slash-ico {
+  color: var(--info);
+}
+.composer-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  padding: 0 2px;
+}
+.composer-hint {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 10px;
 }
 </style>

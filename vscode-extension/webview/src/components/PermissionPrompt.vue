@@ -66,10 +66,10 @@ function deny() {
 .permission-prompt {
   margin: 0 8px 10px;
   padding: 10px;
-  border: 1px solid var(--vscode-panel-border, #333);
-  border-left: 3px solid var(--vscode-inputValidation-warningBorder, #d7a01e);
+  border: 1px solid var(--vscode-panel-border, var(--border));
+  border-left: 3px solid var(--warning-border);
   border-radius: 6px;
-  background: var(--vscode-editorWidget-background, rgba(30, 30, 30, 0.95));
+  background: var(--bg-panel);
   font-size: 0.9em;
 }
 .head {
@@ -85,9 +85,9 @@ function deny() {
   font-weight: 700;
 }
 .tool-name {
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--vscode-editor-font-family, var(--font-mono));
   font-weight: 600;
-  background: rgba(127, 127, 127, 0.15);
+  background: var(--bg-hover);
   padding: 1px 6px;
   border-radius: 4px;
   display: inline-block;
@@ -111,7 +111,7 @@ function deny() {
   margin-right: 6px;
 }
 .perms code {
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--vscode-editor-font-family, var(--font-mono));
   word-break: break-all;
 }
 .args {
@@ -127,7 +127,7 @@ function deny() {
   padding: 6px;
   max-height: 140px;
   overflow: auto;
-  background: rgba(127, 127, 127, 0.1);
+  background: var(--bg-hover);
   border-radius: 4px;
   white-space: pre-wrap;
   word-break: break-all;

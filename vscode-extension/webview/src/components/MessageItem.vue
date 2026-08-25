@@ -133,8 +133,8 @@ function onBodyClick(e: MouseEvent) {
   font-size: 0.78em;
   padding: 3px 10px;
   border-radius: 999px;
-  background: rgba(127, 127, 127, 0.08);
-  border: 1px solid var(--vscode-panel-border, #333);
+  background: var(--bg-hover);
+  border: 1px solid var(--vscode-panel-border, var(--border));
   color: var(--text-muted);
 }
 .stats-icon {
@@ -161,10 +161,10 @@ function onBodyClick(e: MouseEvent) {
   opacity: 0.7;
 }
 .msg.user .author {
-  color: var(--vscode-charts-blue, #4af);
+  color: var(--vscode-charts-blue, var(--info));
 }
 .msg.assistant .author {
-  color: var(--vscode-charts-purple, #a6f);
+  color: var(--vscode-charts-purple, var(--charts-purple));
 }
 
 .body {
@@ -174,11 +174,11 @@ function onBodyClick(e: MouseEvent) {
 }
 .user-body {
   white-space: pre-wrap;
-  background: var(--vscode-input-background, rgba(255, 255, 255, 0.06));
-  border-left: 3px solid var(--vscode-charts-blue, #4af);
+  background: var(--vscode-input-background, var(--bg-hover));
+  border-left: 3px solid var(--vscode-charts-blue, var(--info));
 }
 .assistant .body {
-  background: rgba(127, 127, 127, 0.05);
+  background: var(--bg-hover);
 }
 
 /* system divider */
@@ -193,7 +193,7 @@ function onBodyClick(e: MouseEvent) {
   opacity: 0.6;
   padding: 2px 12px;
   border-radius: 10px;
-  background: rgba(127, 127, 127, 0.1);
+  background: var(--bg-hover);
 }
 .compact {
   font-style: italic;
@@ -211,7 +211,7 @@ function onBodyClick(e: MouseEvent) {
   padding: 3px 6px;
   font-size: 0.72em;
   opacity: 0.55;
-  border-top: 1px solid rgba(127, 127, 127, 0.12);
+  border-top: 1px solid var(--bg-hover);
 }
 .meta-left,
 .meta-right {
@@ -239,12 +239,12 @@ function onBodyClick(e: MouseEvent) {
 }
 .markdown-body :deep(h1) {
   font-size: 1.4em;
-  border-bottom: 1px solid var(--vscode-panel-border, #333);
+  border-bottom: 1px solid var(--vscode-panel-border, var(--border));
   padding-bottom: 4px;
 }
 .markdown-body :deep(h2) {
   font-size: 1.25em;
-  border-bottom: 1px solid var(--vscode-panel-border, #333);
+  border-bottom: 1px solid var(--vscode-panel-border, var(--border));
   padding-bottom: 3px;
 }
 .markdown-body :deep(h3) {
@@ -260,7 +260,7 @@ function onBodyClick(e: MouseEvent) {
 }
 .markdown-body :deep(hr) {
   border: none;
-  border-top: 1px solid var(--vscode-panel-border, #333);
+  border-top: 1px solid var(--vscode-panel-border, var(--border));
   margin: 12px 0;
 }
 .markdown-body :deep(ul),
@@ -282,18 +282,18 @@ function onBodyClick(e: MouseEvent) {
   opacity: 0.7;
 }
 .markdown-body :deep(a) {
-  color: var(--vscode-textLink-foreground, #4af);
+  color: var(--vscode-textLink-foreground, var(--info));
   text-decoration: underline;
 }
 .markdown-body :deep(a:hover) {
-  color: var(--vscode-textLink-activeForeground, #6cf);
+  color: var(--info);
 }
 .markdown-body :deep(img) {
   max-width: 100%;
   border-radius: 4px;
 }
 .markdown-body :deep(blockquote) {
-  border-left: 3px solid var(--vscode-panel-border, #333);
+  border-left: 3px solid var(--vscode-panel-border, var(--border));
   margin: 8px 0;
   padding-left: 10px;
   opacity: 0.85;
@@ -306,34 +306,34 @@ function onBodyClick(e: MouseEvent) {
 }
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
-  border: 1px solid var(--vscode-panel-border, #333);
+  border: 1px solid var(--vscode-panel-border, var(--border));
   padding: 3px 8px;
 }
 .markdown-body :deep(th) {
-  background: rgba(127, 127, 127, 0.12);
+  background: var(--bg-hover);
   font-weight: 600;
 }
 .markdown-body :deep(code) {
-  background: rgba(127, 127, 127, 0.18);
+  background: var(--bg-hover);
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 0.9em;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--vscode-editor-font-family, var(--font-mono));
 }
 .markdown-body :deep(.code-block) {
   margin: 8px 0;
-  border: 1px solid var(--vscode-panel-border, #333);
+  border: 1px solid var(--vscode-panel-border, var(--border));
   border-radius: 6px;
   overflow: hidden;
-  background: var(--vscode-editor-background, #1e1e1e);
+  background: var(--vscode-editor-background, var(--bg));
 }
 .markdown-body :deep(.code-head) {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 3px 8px;
-  background: rgba(127, 127, 127, 0.1);
-  border-bottom: 1px solid var(--vscode-panel-border, #333);
+  background: var(--bg-hover);
+  border-bottom: 1px solid var(--vscode-panel-border, var(--border));
 }
 .markdown-body :deep(.code-lang) {
   font-size: 0.7em;
@@ -344,14 +344,14 @@ function onBodyClick(e: MouseEvent) {
 .markdown-body :deep(.code-copy) {
   font-size: 0.7em;
   padding: 1px 8px;
-  border: 1px solid var(--vscode-panel-border, #333);
+  border: 1px solid var(--vscode-panel-border, var(--border));
   border-radius: 4px;
   background: transparent;
-  color: var(--vscode-foreground, #ddd);
+  color: var(--vscode-foreground, var(--text));
   cursor: pointer;
 }
 .markdown-body :deep(.code-copy:hover) {
-  background: rgba(127, 127, 127, 0.15);
+  background: var(--bg-hover);
 }
 .markdown-body :deep(.code-copy:disabled) {
   opacity: 0.6;
@@ -366,7 +366,7 @@ function onBodyClick(e: MouseEvent) {
   background: none;
   padding: 0;
   font-size: 0.85em;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--vscode-editor-font-family, var(--font-mono));
   white-space: pre;
 }
 </style>

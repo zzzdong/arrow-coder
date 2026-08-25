@@ -64,7 +64,7 @@ function cancelRename() {
         <span class="session-actions">
           <span class="act" title="Open" @click="openSession(ws.path, s.id)">↗</span>
           <span class="act" title="Rename" @click="startRename(s)">✎</span>
-          <span class="act" title="Delete" @click="deleteSession(ws.path, s.id)">🗑</span>
+          <span class="act ac-codicon" title="Delete" @click="deleteSession(ws.path, s.id)">&#xea76;</span>
         </span>
       </div>
     </div>
@@ -74,7 +74,7 @@ function cancelRename() {
 <style scoped>
 .tree {
   padding: 4px 8px;
-  border-bottom: 1px solid var(--vscode-panel-border, #333);
+  border-bottom: 1px solid var(--vscode-panel-border, var(--border));
   max-height: 30vh;
   overflow-y: auto;
 }
@@ -100,9 +100,9 @@ function cancelRename() {
 .rename-input {
   flex: 1 1 auto;
   min-width: 0;
-  background: var(--vscode-input-background, #1e1e1e);
-  color: var(--vscode-foreground, #ddd);
-  border: 1px solid var(--vscode-focusBorder, #0078d4);
+  background: var(--vscode-input-background, var(--bg));
+  color: var(--vscode-foreground, var(--text));
+  border: 1px solid var(--focus-border);
   border-radius: 3px;
   padding: 1px 4px;
   font: inherit;
@@ -120,9 +120,9 @@ function cancelRename() {
   cursor: pointer;
 }
 .act:hover {
-  color: var(--vscode-charts-red, #f55);
+  color: var(--error);
 }
 .session:hover {
-  background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.06));
+  background: var(--vscode-list-hoverBackground, var(--bg-hover));
 }
 </style>

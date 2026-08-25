@@ -92,8 +92,8 @@ function cancelRename() {
   align-items: stretch;
   gap: 4px;
   padding: 3px 4px;
-  border-bottom: 1px solid var(--vscode-panel-border, #333);
-  background: rgba(127, 127, 127, 0.08);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-hover);
 }
 .icon-btn {
   flex: 0 0 auto;
@@ -110,33 +110,33 @@ function cancelRename() {
 }
 .empty-hint {
   padding: 2px 8px;
-  border: 1px dashed var(--vscode-panel-border, #555);
+  border: 1px dashed var(--border);
   border-radius: 3px;
   background: transparent;
-  color: var(--vscode-foreground, #ddd);
+  color: var(--text);
   opacity: 0.7;
   cursor: pointer;
   font: inherit;
 }
 .empty-hint:hover {
   opacity: 1;
-  border-color: var(--vscode-focusBorder, #0078d4);
+  border-color: var(--focus-border);
 }
 .add {
   flex: 0 0 auto;
   width: 26px;
   margin-left: auto;
-  border: 1px solid var(--vscode-panel-border, #333);
+  border: 1px solid var(--border);
   border-radius: 3px;
-  background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
-  color: var(--vscode-foreground, #ddd);
+  background: var(--bg-input);
+  color: var(--text);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
 .add:hover {
-  background: var(--vscode-button-secondaryHoverBackground, rgba(255, 255, 255, 0.16));
-  border-color: var(--vscode-focusBorder, #0078d4);
+  background: var(--bg-hover);
+  border-color: var(--focus-border);
 }
 .tab {
   display: flex;
@@ -147,13 +147,13 @@ function cancelRename() {
   border: 1px solid transparent;
   border-bottom: none;
   border-radius: 3px 3px 0 0;
-  background: var(--vscode-tab-inactiveBackground, rgba(255, 255, 255, 0.04));
+  background: var(--bg);
   cursor: pointer;
   white-space: nowrap;
 }
 .tab.active {
-  background: var(--vscode-tab-activeBackground, rgba(255, 255, 255, 0.1));
-  border-color: var(--vscode-panel-border, #333);
+  background: var(--bg-secondary);
+  border-color: var(--border);
   font-weight: 600;
 }
 .tab-title {
@@ -164,9 +164,9 @@ function cancelRename() {
 .tab-rename {
   flex: 1 1 auto;
   min-width: 0;
-  background: var(--vscode-input-background, #1e1e1e);
-  color: var(--vscode-foreground, #ddd);
-  border: 1px solid var(--vscode-focusBorder, #0078d4);
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--focus-border);
   border-radius: 3px;
   padding: 0 4px;
   font: inherit;
@@ -182,7 +182,7 @@ function cancelRename() {
 }
 .tab-close:hover {
   opacity: 1;
-  color: var(--vscode-charts-red, #f55);
-  background: rgba(255, 255, 255, 0.1);
+  color: var(--error);
+  background: var(--bg-hover);
 }
 </style>

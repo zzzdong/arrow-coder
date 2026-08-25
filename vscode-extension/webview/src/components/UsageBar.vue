@@ -49,10 +49,10 @@ const durationText = computed(() => {
   padding: 2px 10px;
   font-size: 0.7em;
   opacity: 0.55;
-  border-top: 1px solid rgba(127, 127, 127, 0.1);
+  border-top: 1px solid var(--bg-hover);
 }
 .hit {
-  color: var(--vscode-charts-green, #3c3);
+  color: var(--success);
 }
 .dim {
   opacity: 0.6;

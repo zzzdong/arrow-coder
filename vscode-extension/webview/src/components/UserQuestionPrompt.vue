@@ -119,10 +119,10 @@ function cancel() {
 .q-prompt {
   margin: 0 8px 10px;
   padding: 10px;
-  border: 1px solid var(--vscode-panel-border, #333);
-  border-left: 3px solid var(--vscode-charts-purple, #a6f);
+  border: 1px solid var(--vscode-panel-border, var(--border));
+  border-left: 3px solid var(--vscode-charts-purple, var(--charts-purple));
   border-radius: 6px;
-  background: var(--vscode-editorWidget-background, rgba(30, 30, 30, 0.95));
+  background: var(--bg-panel);
   font-size: 0.9em;
 }
 .head {
@@ -143,7 +143,7 @@ function cancel() {
 .close {
   background: none;
   border: none;
-  color: var(--vscode-foreground, #ddd);
+  color: var(--vscode-foreground, var(--text));
   cursor: pointer;
   opacity: 0.6;
   font-size: 0.9em;
@@ -151,7 +151,7 @@ function cancel() {
 .question {
   margin-bottom: 10px;
   padding-bottom: 8px;
-  border-bottom: 1px solid rgba(127, 127, 127, 0.12);
+  border-bottom: 1px solid var(--bg-hover);
 }
 .question:last-child {
   border-bottom: none;
@@ -182,20 +182,20 @@ function cancel() {
 .opt {
   text-align: left;
   padding: 5px 8px;
-  border: 1px solid var(--vscode-panel-border, #333);
+  border: 1px solid var(--vscode-panel-border, var(--border));
   border-radius: 4px;
   background: transparent;
-  color: var(--vscode-foreground, #ddd);
+  color: var(--vscode-foreground, var(--text));
   cursor: pointer;
   display: flex;
   flex-direction: column;
 }
 .opt:hover {
-  background: rgba(127, 127, 127, 0.12);
+  background: var(--bg-hover);
 }
 .opt.chosen {
-  border-color: var(--vscode-charts-purple, #a6f);
-  background: rgba(170, 100, 255, 0.15);
+  border-color: var(--vscode-charts-purple, var(--charts-purple));
+  background: var(--bg-secondary);
 }
 .opt-desc {
   font-size: 0.8em;
@@ -209,9 +209,9 @@ function cancel() {
 .q-input {
   width: 100%;
   box-sizing: border-box;
-  background: var(--vscode-input-background, rgba(255, 255, 255, 0.06));
-  color: var(--vscode-input-foreground, #ddd);
-  border: 1px solid var(--vscode-panel-border, #333);
+  background: var(--vscode-input-background, var(--bg-hover));
+  color: var(--vscode-input-foreground, var(--text));
+  border: 1px solid var(--vscode-panel-border, var(--border));
   border-radius: 4px;
   padding: 5px 8px;
   font-family: inherit;

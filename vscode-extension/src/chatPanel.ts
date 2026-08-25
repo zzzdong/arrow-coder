@@ -48,7 +48,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'out', 'webview')],
     };
-    view.webview.html = this.render();
+    view.webview.html = this.renderHtml(view.webview);
 
     // Detach listeners from any previously resolved (now re-created) webview so
     // we never forward a host notification more than once.
@@ -402,15 +402,46 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage(msg);
   }
 
-  private render(): string {
+  /**
+   * Open the chat in a standalone editor panel (e.g. beside the code editor)
+   * so the user can keep a wide conversation view while editing. The panel
+   * shares the same host and forwards the same JSON-RPC bridge as the sidebar.
+   */
+  public async openInEditor(): Promise<void> {
+    const panel = vscode.window.createWebviewPanel(
+      'arrowCoder.chatEditor',
+      'Arrow Coder Chat',
+      vscode.ViewColumn.Beside,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'out', 'webview')],
+      }
+    );
+    panel.webview.html = this.renderHtml(panel.webview);
+
+    // Reuse the shared host bridge: forward notifications to this panel too.
+    const notifOff = this.host.onNotification((n) => panel.webview.postMessage(n));
+    const statusOff = this.host.onStatus((ready) => {
+      if (ready) panel.webview.postMessage({ jsonrpc: '2.0', method: 'host/status', params: { ready: true } });
+    });
+    panel.webview.onDidReceiveMessage((msg) => this.handleUiMessage(msg as JsonRpcRequest));
+    panel.onDidDispose(() => {
+      notifOff();
+      statusOff();
+    });
+    panel.reveal(vscode.ViewColumn.Beside);
+  }
+
+  private renderHtml(webview: vscode.Webview): string {
     // Vite emits an ES module bundle plus a CSS file; both must be loaded via
     // asWebviewUri (the webview can't resolve the bundle's own absolute
     // `/assets/...` paths). The @vscode-elements components are bundled into
     // the module, no extra <script> needed.
-    const scriptUri = this.view!.webview.asWebviewUri(
+    const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'out', 'webview', 'assets', 'index.js')
     );
-    const styleUri = this.view!.webview.asWebviewUri(
+    const styleUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, 'out', 'webview', 'assets', 'index.css')
     );
     const nonce = ChatViewProvider.getNonce();
@@ -419,7 +450,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; style-src ${this.view!.webview.cspSource} 'unsafe-inline'; img-src ${this.view!.webview.cspSource} https: data:; script-src 'nonce-${nonce}';" />
+        content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} https: data:; script-src 'nonce-${nonce}';" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Arrow Coder</title>
   <link rel="stylesheet" href="${styleUri}" />

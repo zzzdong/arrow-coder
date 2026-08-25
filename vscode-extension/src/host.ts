@@ -312,6 +312,37 @@ export class ArrowCoderHost {
     this.starting = false;
   }
 
+  /**
+   * Terminate the host process and resolve once the child has actually exited
+   * (or immediately if it was not running). Used by `restart()` so the new
+   * spawn does not race with the old process tearing down.
+   */
+  stopAndWait(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (!this.proc) {
+        resolve();
+        return;
+      }
+      const proc = this.proc;
+      let settled = false;
+      const done = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      proc.once('exit', done);
+      // Force-kill if it ignores SIGTERM.
+      try {
+        proc.kill('SIGTERM');
+      } catch {
+        done();
+      }
+      // Safety timeout: don't hang forever on a stuck process.
+      setTimeout(done, 5000);
+    });
+  }
+
   private send(req: JsonRpcRequest): void {
     if (!this.proc?.stdin) {
       throw new Error('Host stdin unavailable');

@@ -305,6 +305,166 @@ core 已经具备清晰的分层。自底向上：
 
 ---
 
+## 8. 配置管理审查（2026-08-25）
+
+> 审查范围：`crates/arrow-coder-core/src/core/config.rs`（`VibeConfig` + `ConfigRepository` 实现）、`config.toml`、models 加载链路（`agents/models.rs`/`agents/utils.rs`）。
+
+### 8.1 问题 1：配置是否过重 / 存在不需要的项
+
+**结论：存在 4 处死字段（定义 + merge 但零消费），建议删除。**
+
+| 字段 / 类型 | 位置 | 消费情况 |
+|---|---|---|
+| `connectors: Vec<ConnectorConfig>` | config.rs:433 / 691 | **零消费**；`ConnectorConfig` 结构体（config.rs:382）也完全未被引用 → 死 struct + 死字段 |
+| `ConnectorConfig` | config.rs:382 | 仅被 `connectors` 字段引用，无消费 → 整块可删 |
+| `vibe_code_enabled: bool` | config.rs:446 / 490 / 702 | **零消费**（仅定义 + default + merge） |
+| `session_logging: SessionLoggingConfig` | config.rs:442 / 485 / 700 | **零消费**；`SessionLoggingConfig`（config.rs:399，含 `enabled`/`dir`）也无人读取 |
+| `tool_paths: Vec<PathBuf>` | config.rs:448 / 491 / 703 | **零消费**（仅定义 + default + merge） |
+
+**仍被真实消费的字段**（保留）：`active_model`、`models_file`、`default_agent`、`bypass_tool_permissions`、`context_warnings`、`mcp_servers`（mcp/mod.rs:31 真正加载）、`disabled_tools`（tools/manager、permission_checker、agent_loop 均消费）、`installed_agents`/`custom_agents`/`disabled_agents`（agents/manager）、`enabled_skills`/`disabled_skills`（skills/manager）、`tools`（ToolConfig）。
+
+> 冗余字段来源推测：早期设计预留了"连接器/插件/会话日志/工具路径"能力，但实现从未落地，字段保留在 struct 中参与 merge，造成"配置很重"的错觉且增加维护成本。
+
+### 8.2 问题 2：配置为空时能否正常初始化
+
+**结论：真正的"空配置"（文件不存在 / 文件为空串）能正常兜底；但 `config.toml`（当前 modified 版本）含未知字段 `default_model`，会导致整个加载失败。**
+
+加载链路（`config.rs` 的 `load_resolved`，config.rs:24-52）：
+1. 从 `Self::default()` 起步（active_model 默认 `"deepseek-chat"`，其余默认空）。
+2. 逐层 `load_file`：user → project → base → agent。
+3. `load_file`（config.rs:29-35）：文件不存在返回 `Ok(None)`（跳过）；读到内容 `Self::from_str(s)`；**空串 `from_str("")` 解析为默认值 `Ok(default)`**。
+
+因此：
+- **文件不存在**：每层级跳过，`load_resolved` 返回 default → ✅ 能初始化。
+- **文件为空**：`from_str("")` 返回默认 → ✅ 能初始化。
+- **`config.toml` 当前内容（第 1 行 `default_model = ""`）**：`VibeConfig` **无 `default_model` 字段**（它在 `AgentConfig` 而非 `VibeConfig`）。实测 `toml` crate 对 struct 未知字段**默认是静默忽略（不报错）**——`default_model` 被直接丢弃，`active_model` 保持 `None`，配置语义悄然错误（不会崩溃，但 active model 选区为空/回退）。⚠️ **这是真实的配置语义 bug**（原 §8.2 初稿误判为"加载崩溃"，实测已修正）。
+- 同文件还缺 example 要求的 `active_model`/`models_file` 关键字段。
+
+**修复（已实施，2026-08-25）**：
+- 删除 `config.toml` 的 `default_model` → 改为 `active_model = "deepseek-chat"` + 补 `models_file = "models.toml"`；并删除同样为死字段的 `connectors`/`vibe_code_enabled`/`tool_paths` 键（见 §8.1）。
+- 给 `VibeConfig` 加 `#[serde(deny_unknown_fields)]`：让字段名拼写错误（如 `default_model`）在加载时**显式失败**而非静默忽略（这是比"静默回退"更安全的默认，避免配置悄然失效）。
+- `default_agent` 加 `#[serde(default = "default_agent_name")]`：使配置文件可省略该字段（空文件/空串也能解析为默认 `"default"`），真正满足"空配置能初始化"。
+- 补充回归测试（`core/config.rs` tests mod）：`valid_config_parses_with_deny_unknown_fields`（正确字段解析）、`unknown_field_rejected_by_deny_unknown_fields`（未知字段显式失败）、`empty_config_resolves_to_defaults`（空串兜底）。
+
+### 8.3 问题 3：models 加载是否正确 / core 是否提供动态管理方法
+
+**结论：models 加载正确且有完整动态管理 API；但"内置 provider 目录"的发现机制（`models/builtin`）未在本次审查中验证其路径正确性。**
+
+**加载链路（正确）**：
+- `agents/utils.rs` 的 `parse_models_file`：先逐行扫描 `[models]`/`name =` 拿到所有 model name（header pass），再 `toml::from_str` 解析整个文档（`agents/utils.rs:46-90`）。
+- `agents/models.rs` 的 `resolve_model`：按 `name` → `alias` → `provider` 三级 fallback 解析；内置模型（name 在 `builtin_models()` 中）覆盖 user 定义（models.rs:130-168）。✅ 逻辑正确。
+- `builtin_models()` 内置 `deepseek-chat`/`deepseek-reasoner` 等（`agents/models.rs:188-216`），保证"零配置"时也有可用模型。✅
+
+**core 提供的动态管理 API（via `ConfigRepository` trait，repository.rs:103-172）**：
+- `list_models()` → `Result<Vec<ModelConfig>>`
+- `resolve_model(name) -> Result<ModelConfig>`
+- `set_models(Vec<ModelConfig>)` / `set_active_model(String)` / `set_model_thinking(name, thinking)` / `set_model_reasoning_effort(name, effort)` / `set_model_context_window(name, usize)` / `set_model_max_tokens(name, usize)`
+- `available_providers()` / `watch()`（返回变更 `watch::Receiver`，供宿主热更新 UI）
+
+✅ core **确实提供**完整的 models 动态管理方法（增删改 + 切换 + 监听），vscode 的 `models/builtin`、`config/update` 等方法已对接（见 §3.2）。
+
+**两点待确认（非阻断）**：
+- `models/builtin` 依赖"内置 provider 目录"（`providers/` 目录扫描），其路径解析未在本审查中跑通验证。
+- `set_models` 会重写整个 TOML 文档（repository.rs:318 `build_document` + `write_split`），会保留未识别字段（`unrecognized` 段，repository.rs:339-342），但**不会写回被 §8.1 标为死字段的项**（因为它们不进 `to_document_fields`），重写后这些死字段会从持久化文件中丢失——这反而能"自然清理"冗余字段。
+
+### 8.4 审查变更记录
+
+| 日期 | 变更 | 对应 |
+|---|---|---|
+| 2026-08-25 | 完成 §8 配置管理审查：发现 4 处死字段、config.toml 的 default_model 配置语义 bug、models 加载正确且动态管理 API 完整 | §8 |
+| 2026-08-25 | **[实施] 删除 4 处死字段**：`connectors`/`ConnectorConfig`（含结构体）、`vibe_code_enabled`、`session_logging`/`SessionLoggingConfig`（含结构体）、`tool_paths`，及对应 merge/default 代码；`core/mod.rs` 导出列表移除 `ConnectorConfig` | §8.1 |
+| 2026-08-25 | **[实施] 修复 config.toml**：`default_model` → `active_model = "deepseek-chat"`，补 `models_file = "models.toml"`，删除死字段键 `connectors`/`vibe_code_enabled`/`tool_paths` | §8.2 |
+| 2026-08-25 | **[实施] `VibeConfig` 加 `#[serde(deny_unknown_fields)]`**（未知字段显式失败而非静默忽略）+ `default_agent` 加 `#[serde(default = "default_agent_name")]`（空配置兜底）；修正 §8.2 初稿对 toml 行为的误判（实测为静默忽略） | §8.2 |
+| 2026-08-25 | **[实施] 回归测试**：`core/config.rs` 新增 `valid_config_parses_with_deny_unknown_fields` / `unknown_field_rejected_by_deny_unknown_fields` / `empty_config_resolves_to_defaults` | §8.2 |
+| 2026-08-25 | **验证**：`cargo build -p arrow-coder-core -p arrow-coder-vscode` 通过；config 模块新测试 3 项全过。遗留 2 个既有失败 `resolve_provider_deepseek_*`（断言 `kind()=="deepseek-chat"` 实际 `"deepseek"`），属 provider 预设语义、与本次配置重构无关，未改动 | §8.4 |
+
+---
+
+## 9. model 配置架构规划与实施（2026-08-25）
+
+### 9.1 目标
+
+围绕三个核心问题重做 model 配置架构：
+
+1. **ModelConfig 应直接承载请求 LLM 的全部信息**（endpoint / 类型 / api_key / model_id / 思考强度 / 长度限制 / 厂商拓展参数），使 backend 可直接据此构建请求。
+2. **Provider = 直接服务提供商**，内置写死预设（backend 类型、官方 url、窗口长度、默认采样），用户选 provider 后下拉选模型 + 填 key 即可。
+3. **DeepSeek 兼容**：它是 "openai-chat 协议族的一个带拓展的变体"，不是裸 openai。采用**协议族 + 能力声明 + extra 容器**三层模型，差异点从 backend 内联提升为 provider 预设字段。
+
+### 9.2 三层架构模型
+
+```
+协议族 (protocol family)         —— 决定请求/响应如何序列化
+  ├─ openai-chat          → OpenAIBackend
+  ├─ deepseek-chat        → DeepSeekChatBackend   (openai-chat 的变体)
+  ├─ deepseek-responses   → DeepSeekResponsesBackend (完全不同的 schema)
+  └─ anthropic            → AnthropicBackend (未来)
+
+backend 能力 (capabilities)      —— 决定"能做什么/字段怎么映射"
+  ├─ reasoning_field: Option<String>   (content 并列的推理字段名)
+  ├─ cache_hit_field: Option<String>   (usage 里缓存命中字段名)
+  ├─ rejects_penalty: bool              (DeepSeek chat 拒绝 presence/frequency)
+  ├─ supports_thinking: bool
+  └─ ...
+
+provider 预设 (BuiltinProvider)    —— 绑定 协议族 + 能力 + url + 默认采样 + 模型目录
+```
+
+`BuiltinProvider.kind` 改为**协议族标识**（`"openai-chat"` / `"deepseek-chat"` / `"deepseek-responses"` / `"anthropic"`），`init_backend` 按协议族 match——这样 test 期望 `"deepseek-chat"` 能与预设对齐，同时修掉 §8.4 遗留的两个失败测试。
+
+### 9.3 ModelConfig 字段分层（实施后的形态）
+
+**(A) 身份与接入**：`name` / `model_id`（发给 API 的 id，可不同于展示名）/ `provider` / `endpoint`（覆盖预设）/ `api_key`（覆盖预设）/ `api_key_env_var` / `reasoning_field`（覆盖预设）。
+
+**(B) 模型固有约束（P1 新增）**：
+- `context_window: Option<u32>` —— 模型上下文总长。
+- `max_output_tokens: Option<u32>` —— **模型硬上限**，与采样上限 `max_tokens` 区分开。
+- `supports_reasoning` / `supports_vision` / `supports_tools: Option<bool>` —— 能力声明，UI 下拉时灰掉不支持项。
+
+**(C) 请求采样参数（已有）**：`temperature` / `top_p` / `top_k` / `presence_penalty` / `reasoning_effort` / `thinking` / `auto_compact_threshold` / `max_tokens`。
+
+**(D) 厂商拓展参数（P1 新增）**：
+```rust
+#[serde(default, skip_serializing_if = "HashMap::is_empty")]
+pub extra: HashMap<String, serde_json::Value>,
+```
+承载某型模型特定参数（如 DeepSeek 的 `budget_tokens`、Anthropic 的 `thinking.budget_tokens`）。backend 按协议族选择性读取。不破坏 `deny_unknown_fields`。
+
+`effective_*` 方法（已有 `effective_temperature`/`effective_top_p`，返回 `f64`）扩展为同样提供 `effective_max_tokens` / `effective_context_window` 的兜底逻辑（缺失时回退 provider / 全局默认）。
+
+### 9.4 实施记录（P1–P3，UI 端 P4 暂缓）
+
+| 阶段 | 改动 |
+|---|---|
+| **P1 字段补全** | `ModelConfig` 加 `context_window`/`max_output_tokens`/`supports_*`/`extra`；`BuiltinProvider` 加 `capabilities` 可选字段（`reasoning_field`/`cache_hit_field`/`rejects_penalty`/`supports_thinking`）；`BuiltinModel` 加 `context_window`；`with_defaults` 把 provider 的 capability 注入 model 的对应字段 |
+| **P2 类型对齐** | `builtin_provider` 的 `kind` 改为协议族标识（`openai-chat` 等）；`init_backend` 同步 match；修 §8.4 遗留 2 测试（`kind()` 期望 `"deepseek-chat"`） |
+| **P3 能力下沉** | `rejects_penalty` / `cache_hit_field` / `reasoning_field` 从 backend 内联硬编码改为读 provider 预设；`DeepSeekChatBackend` 的 usage 映射（`prompt_cache_hit_tokens` → `cache_hit_tokens`）按预设字段名读取，OpenAI backend 声明 `cache_hit_field = None` |
+| **P4 UI 端** | 前端下拉流锁定"选 provider → 选 model → 填 key"，provider 带 capability 预填 context_window / 默认 effort。**本次暂缓（用户确认 UI 端先不做）** |
+
+### 9.5 实施变更记录（2026-08-25）
+
+**文件：`crates/arrow-coder-core/src/core/config.rs`**
+- `BuiltinProvider` 结构体新增 capability 字段：`cache_hit_field: Option<&'static str>` / `rejects_penalty: bool` / `supports_thinking: bool` / `context_window: u32`。
+- `builtin_provider()` 各分支补 capability；`kind` 改为**协议族标识**：`deepseek`→`deepseek-chat`、`openai`/`openai_compatible`/`local`→`openai-chat`、`deepseek-responses`/`anthropic` 不变。
+- `ProviderConfig` 新增 `cache_hit_field_name` / `rejects_penalty` / `supports_thinking` / `context_window`，并加 `supports_cache_hit()` 方法。
+- `ModelConfig` 新增：`context_window` / `max_output_tokens` / `supports_reasoning` / `supports_vision` / `supports_tools`（均 `Option`）与 `extra: HashMap<String, serde_json::Value>`（开放拓展参数容器）。
+- `effective_max_tokens()` 现受 `max_output_tokens` 硬上限约束；新增 `effective_context_window()` / `effective_supports_reasoning()`。
+- `resolve_provider()` 注入 capability 到 `ProviderConfig`。
+- `with_defaults()` 四个内置模型补新字段（均 `None`/空，由 provider 兜底）。
+- 测试：修复 4 处遗留 `kind()` 断言（`openai`→`openai-chat`）；新增 5 个回归测试（capability 注入、`effective_context_window`、`effective_max_tokens` 硬上限、`extra` 容器）。
+
+**文件：`crates/arrow-coder-core/src/llm/mod.rs`**
+- `init_backend()` 的 `kind` match 改为协议族标识：`openai-chat`→OpenAIBackend、`deepseek-chat`→DeepSeekChatBackend、`deepseek-responses`→DeepSeekResponsesBackend；错误信息同步更新。
+
+**文件：`crates/arrow-coder-core/src/llm/openai.rs`**
+- `build_request` 发送 `presence_penalty` 前检查 `self.provider.rejects_penalty`，为 true 时跳过该字段（DeepSeek 走此 backend 之外的路径，但能力下沉逻辑统一在此）。
+
+**文件：`crates/arrow-coder-core/src/llm/deepseek.rs` / `crates/arrow-coder-core/src/agent/agent_loop.rs`**
+- 测试 `ModelConfig` 构造补 6 个新字段（保持编译通过）。
+
+**验证**：`cargo build -p arrow-coder-core -p arrow-coder-vscode` 通过；`cargo test -p arrow-coder-core` 全部 128 项通过（含 §8 遗留 2 项 + 本次 4 项断言修复 + 5 项新增）。仅 2 个既有的 `CommandExt` 未使用 warning 与本次无关。
+
+---
+
 ## 附录 A：关键路径速查
 
 - core 公共入口：`crates/arrow-coder-core/src/lib.rs` → `pub mod agent/core/tools/...`

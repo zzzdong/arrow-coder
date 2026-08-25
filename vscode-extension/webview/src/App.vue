@@ -1,282 +1,190 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
-import { rpc } from './rpc';
+import { ref, computed, nextTick, onMounted } from 'vue';
 import { useChatStore } from './stores/chat';
-import type { JsonRpcNotification } from './protocol';
-import type {
-  ConfigParams,
-  WorkspaceStateParams,
-  ToolStreamParams,
-  FileChangesParams,
-  PermissionRequestParams,
-  UserQuestionParams,
-  UsageParams,
-  TodoParams,
-  UiMessageParams,
-} from './protocol';
-import SessionTabs from './components/SessionTabs.vue';
 import Toolbar from './components/Toolbar.vue';
-import WorkspaceTree from './components/WorkspaceTree.vue';
 import MessageList from './components/MessageList.vue';
 import Composer from './components/Composer.vue';
-import FileChangesPanel from './components/FileChangesPanel.vue';
-import TodoPanel from './components/TodoPanel.vue';
-import PermissionPrompt from './components/PermissionPrompt.vue';
-import UserQuestionPrompt from './components/UserQuestionPrompt.vue';
-import UsageBar from './components/UsageBar.vue';
-import ModelSettings from './components/ModelSettings.vue';
+import SessionTabs from './components/SessionTabs.vue';
+import SettingsView from './components/SettingsView.vue';
 
 const store = useChatStore();
 
-const showHistory = ref(false);
-function toggleHistory() {
-  showHistory.value = !showHistory.value;
-}
-const showSettings = ref(false);
-function toggleSettings() {
-  showSettings.value = !showSettings.value;
-}
+// Top-level view switch: chat (default) vs settings (no more drawer).
+type ViewName = 'chat' | 'settings';
+const view = ref<ViewName>('chat');
+const showChat = () => (view.value = 'chat');
+const showSettings = () => (view.value = 'settings');
 
-function newSession() {
-  showHistory.value = false;
-  void store.newSession();
-}
+// ---- Session history Popover (driven by the real workspace snapshot) ----
+const historyOpen = ref(false);
+const historyRef = ref<HTMLElement | null>(null);
+const historyQuery = ref('');
 
-function handleNotification(n: JsonRpcNotification) {
-  const p = n.params as Record<string, any>;
-  switch (n.method) {
-    case 'host/status':
-      store.setReady(!!p?.ready, p?.error);
-      break;
-    case 'session/config':
-      store.setConfig(p as ConfigParams);
-      break;
-    case 'session/workspace_state':
-      store.setWorkspace(p as WorkspaceStateParams);
-      break;
-    // The timeline's single source of truth: live streaming AND history replay
-    // both arrive as `agent/ui_message` (see chat.ts `appendUiMessage`).
-    case 'agent/ui_message':
-      store.appendUiMessage(p as UiMessageParams);
-      break;
-    case 'agent/tool_stream':
-      // Long-running tool stdout (e.g. bash progress) is streamed separately.
-      store.appendToolStream(p as ToolStreamParams);
-      break;
-    case 'agent/compact_start':
-      store.addSystem(`Compacting context (${p.old_tokens} tokens)…`);
-      break;
-    case 'agent/compact_end':
-      store.setCompact(p.old_tokens ?? 0, p.new_tokens ?? 0, p.summary ?? '');
-      break;
-    case 'agent/system':
-      store.addSystem(p.message);
-      break;
-    case 'agent/done':
-      store.busy = false;
-      store.opening = false;
-      store.closeLastAssistantFences();
-      store.finishThinking();
-      // Per-turn stats are appended as `agent/ui_message` (role: stats) computed
-      // + persisted in core, so live and resumed timelines stay consistent.
-      break;
-    case 'agent/error':
-      store.busy = false;
-      store.addError(p.error);
-      store.closeLastAssistantFences();
-      store.finishThinking();
-      break;
-    case 'agent/file_changes':
-      store.setFileChanges(p as FileChangesParams);
-      break;
-    case 'agent/todo':
-      store.setTodos((p as TodoParams).todos);
-      break;
-    case 'session/permission_request':
-      store.setPendingPermission(p as PermissionRequestParams);
-      break;
-    case 'session/user_question':
-      store.setPendingQuestion(p as UserQuestionParams);
-      break;
-    case 'agent/usage':
-      store.setUsage(p as UsageParams);
-      break;
-    case 'ui/toggleHistory':
-      toggleHistory();
-      break;
-    case 'ui/injectReference': {
-      // Right-click "Add to Arrow Coder Chat" from the editor/explorer.
-      // Push a structured reference block so the core expands it IN PLACE
-      // (preserving its position relative to any typed text), instead of
-      // flattening everything to a string.
-      const params = n.params as {
-        kind: 'path' | 'selection';
-        path: string;
-        isDir?: boolean;
-        startLine?: number;
-        endLine?: number;
-        snippet?: string;
-      };
-      if (params.kind === 'selection' && params.snippet && params.startLine && params.endLine) {
-        store.pushReference({
-          kind: 'selection',
-          path: params.path,
-          range: { start: params.startLine, end: params.endLine },
-          snippet: params.snippet,
-        });
-      } else if (params.isDir) {
-        store.pushReference({ kind: 'dir', path: params.path, depth: 2 });
-      } else {
-        store.pushReference({ kind: 'file', path: params.path });
-      }
-      break;
+const flatSessions = computed(() => {
+  const ws = store.workspace?.workspaces ?? [];
+  const out: { id: string; title: string; path: string; meta: string }[] = [];
+  for (const w of ws) {
+    for (const s of w.sessions) {
+      out.push({
+        id: `${w.path}::${s.id}`,
+        title: s.title || '未命名会话',
+        path: w.path,
+        meta: w.path,
+      });
     }
   }
-}
-
-onMounted(() => {
-  rpc.onNotification(handleNotification);
-  rpc.ready();
+  return out;
 });
+const filteredSessions = computed(() => {
+  const q = historyQuery.value.trim().toLowerCase();
+  if (!q) return flatSessions.value;
+  return flatSessions.value.filter((s) => s.title.toLowerCase().includes(q));
+});
+
+function toggleHistory() {
+  historyOpen.value = !historyOpen.value;
+  if (historyOpen.value) historyQuery.value = '';
+}
+function onSelectSession(id: string) {
+  historyOpen.value = false;
+  void store.switchTab(id);
+}
+function onPointerDown(e: PointerEvent) {
+  if (historyOpen.value && historyRef.value && !historyRef.value.contains(e.target as Node)) {
+    historyOpen.value = false;
+  }
+}
+onMounted(() => document.addEventListener('pointerdown', onPointerDown));
+
+// ---- Sticky scroll ----
+const listRef = ref<InstanceType<typeof MessageList> | null>(null);
+const version = ''; // reserved for indexed-state banner
 </script>
 
 <template>
-  <div class="layout">
-    <!-- Tab bar for open sessions -->
-    <SessionTabs />
-    <!-- Message area -->
-    <MessageList />
-    <!-- Tool-invocation approval prompt (host asks the user to allow a tool) -->
-    <PermissionPrompt />
-    <!-- User-question prompt (ask_user_question tool) -->
-    <UserQuestionPrompt />
-    <!-- File changes panel (shows after a turn completes) -->
-    <FileChangesPanel />
-    <!-- Agent todo list / plan panel (manual cancel & trigger) -->
-    <TodoPanel />
-    <!-- Input toolbar (辅助输入: @提及 / 附件 / Skills / 模型 / 配置) sits directly above the composer -->
-    <Toolbar @settings="showSettings = true" />
-    <!-- Input area with action bar (includes the in-bar ContextMeter) -->
-    <Composer />
-    <!-- Session-wide token usage + cache-hit rate (harness-style cumulative) -->
-    <div class="usage-row">
-      <UsageBar />
-    </div>
-    <!-- Footer disclaimer -->
-    <footer class="disclaimer">内容由 AI 生成，仅供参考</footer>
+  <div class="app-root">
+    <template v-if="view === 'chat'">
+      <Toolbar @toggle-history="toggleHistory" @open-settings="showSettings" />
+      <SessionTabs />
+      <MessageList ref="listRef" />
+      <Composer />
+    </template>
 
-    <div v-if="showHistory" class="drawer-mask" @click.self="showHistory = false">
-      <div class="drawer">
-        <div class="drawer-head">
-          <span>Session History</span>
-          <div class="drawer-actions">
-            <vscode-button appearance="secondary" @click="newSession">＋</vscode-button>
-            <vscode-button appearance="secondary" @click="showHistory = false">✕</vscode-button>
-          </div>
-        </div>
-        <WorkspaceTree @navigated="showHistory = false" />
+    <template v-else>
+      <SettingsView @back="showChat" />
+    </template>
+
+    <!-- History popover -->
+    <div v-if="historyOpen" ref="historyRef" class="history-popover" role="dialog">
+      <div class="hp-header">
+        <span class="hp-title">会话历史</span>
+        <vscode-text-field
+          class="hp-search"
+          placeholder="搜索会话…"
+          :value="historyQuery"
+          @input="historyQuery = ($event.target as HTMLInputElement).value"
+        >
+          <span slot="start" class="ac-codicon hp-search-icon">&#xea6e;</span>
+        </vscode-text-field>
+      </div>
+      <div class="hp-list">
+        <div v-if="filteredSessions.length === 0" class="hp-empty">没有匹配的会话</div>
+        <button
+          v-for="s in filteredSessions"
+          :key="s.id"
+          class="hp-item"
+          :class="{ 'hp-active': s.id === store.activeTab?.id }"
+          @click="onSelectSession(s.id)"
+        >
+          <span class="hp-item-title">{{ s.title }}</span>
+          <span class="hp-item-meta">{{ s.meta }}</span>
+        </button>
       </div>
     </div>
-
-    <ModelSettings v-if="showSettings" @close="showSettings = false" />
   </div>
 </template>
 
-<style>
-:root {
-  color-scheme: light dark;
-}
-html,
-body,
-#app {
-  height: 100%;
-  margin: 0;
-}
-body {
-  font-family: var(--vscode-font-family, sans-serif);
-  font-size: 13px;
-  background: var(--vscode-editor-background, #1e1e1e);
-  color: var(--vscode-foreground, #ddd);
-}
-.layout {
+<style scoped>
+.app-root {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
+  background: var(--bg);
+  position: relative;
 }
-
-/* ---- Title bar ---- */
-.titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--vscode-panel-border, #333);
-  background: var(--vscode-titleBar-activeBackground, rgba(127,127,127,.12));
-}
-.brand {
-  font-weight: 700;
-  font-size: 0.95em;
-  letter-spacing: 0.02em;
-}
-.title-actions {
-  display: flex;
-  gap: 4px;
-}
-.tb-btn {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--vscode-foreground, #ddd);
-  cursor: pointer;
-  font-size: 15px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  line-height: 1.3;
-}
-.tb-btn:hover {
-  background: rgba(255,255,255,.08);
-  border-color: var(--vscode-panel-border,#333);
-}
-
-/* ---- Footer disclaimer ---- */
-.usage-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px 2px;
-}
-.disclaimer {
-  text-align: center;
-  font-size: 0.75em;
-  opacity: 0.45;
-  padding: 3px 0 5px;
-  user-select: none;
-  border-top: 1px solid var(--vscode-panel-border, #333);
-}
-
-.drawer-mask {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  display: flex;
-  justify-content: flex-end;
-  z-index: 20;
-}
-.drawer {
+.history-popover {
+  position: absolute;
+  top: 44px;
+  right: 8px;
+  z-index: 30;
   width: 320px;
-  max-width: 80vw;
-  height: 100%;
-  background: var(--vscode-sideBar-background, #252526);
-  border-left: 1px solid var(--vscode-panel-border, #333);
+  max-height: 60vh;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-widget);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popover);
+  overflow: hidden;
 }
-.drawer-head {
+.hp-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 8px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.hp-title {
   font-weight: 600;
-  border-bottom: 1px solid var(--vscode-panel-border, #333);
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+.hp-search-icon {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+.hp-list {
+  overflow-y: auto;
+  flex: 1;
+}
+.hp-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.hp-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.hp-item:hover {
+  background: var(--bg-hover);
+}
+.hp-active {
+  background: var(--bg-selected);
+}
+.hp-item-title {
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hp-item-meta {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

@@ -1475,6 +1475,12 @@ mod tests {
             top_p: None,
             top_k: None,
             presence_penalty: None,
+            context_window: None,
+            max_output_tokens: None,
+            supports_reasoning: None,
+            supports_vision: None,
+            supports_tools: None,
+            extra: std::collections::HashMap::new(),
         }
     }
 

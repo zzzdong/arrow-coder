@@ -22,13 +22,10 @@ function argText(): string {
   }
 }
 
-/** Extract a short human-readable file label for the card head, e.g.
- *  `write_file`/`read`/`view`/`edit`/`delete` expose `args.path`. We show the
- *  basename so it fits in the collapsed header, with the full path as a tooltip. */
 const fileLabel = computed<{ basename: string; full: string } | null>(() => {
   const args = tool.value?.args;
   if (!args || typeof args !== 'object') return null;
-  const raw = (args as Record<string, unknown>);
+  const raw = args as Record<string, unknown>;
   const path = typeof raw.path === 'string' && raw.path ? raw.path : undefined;
   const target = path ?? (typeof raw.pattern === 'string' && raw.pattern ? raw.pattern : undefined);
   if (!target) return null;
@@ -37,134 +34,279 @@ const fileLabel = computed<{ basename: string; full: string } | null>(() => {
   return { basename, full: target };
 });
 
+// Map a tool name to a Codicon glyph + semantic color.
+const ICONS: Record<string, string> = {
+  read: '', view: '', open: '',
+  write_file: '', write: '', create: '',
+  edit: '✎', update: '✎', patch: '✎',
+  delete: '', remove: '',
+  search: '', grep: '', find: '',
+  run: '⚙', exec: '⚙', bash: '⚙', shell: '⚙',
+  fetch: '', http: '', web: '',
+  todo: '☑', plan: '',
+  ask: '❓', question: '❓',
+};
+const icon = computed(() => ICONS[tool.value?.name ?? ''] ?? '⚙');
+
+const tone = computed<'done' | 'error' | 'cancel' | 'run' | 'pending'>(() => {
+  const t = tool.value;
+  if (!t) return 'pending';
+  if (t.cancelled) return 'cancel';
+  if (t.error) return 'error';
+  if (t.stream || t.result === undefined) return t.stream ? 'run' : 'run';
+  return 'done';
+});
+
+const statusText = computed(() => {
+  const t = tool.value;
+  if (!t) return 'pending';
+  if (t.cancelled) return '已取消';
+  if (t.error) return '失败';
+  if (t.stream) return '执行中…';
+  if (t.result !== undefined) return '完成';
+  return '等待中';
+});
+
+// Detect diff-like result (string containing +/- lines) to render a collapse.
+const diffText = computed<string | null>(() => {
+  const r = tool.value?.result;
+  if (typeof r !== 'string') return null;
+  if (/^[\s\S]*\n?[-+].*$/m.test(r) && (r.includes('\n-') || r.includes('\n+'))) return r;
+  return null;
+});
+
 function onToggle(e: Event) {
   const details = e.target as HTMLDetailsElement;
   emit('update:open', details.open);
-  // Any user interaction marks the block as explicitly user-controlled, so the
-  // auto-collapse on `done` respects their choice (even if they collapse it).
   emit('update:userExpanded', true);
 }
-
-/** A short human-readable status for the card head. */
-const statusText = computed(() => {
-  const t = tool.value;
-  if (!t) return '';
-  if (t.cancelled) return 'cancelled';
-  if (t.error) return 'error';
-  if (t.stream) return 'running…';
-  if (t.result !== undefined) return 'done';
-  return 'pending';
-});
 </script>
 
 <template>
-  <details class="tool" :class="{ cancelled: tool?.cancelled, error: !!tool?.error }" :open="props.open" @toggle="onToggle">
-    <summary class="head">
-      <span class="chevron">▶</span>
-      <span class="name">{{ tool?.name ?? 'tool' }}</span>
-      <span v-if="fileLabel" class="file" :title="fileLabel.full">📄 {{ fileLabel.basename }}</span>
-      <vscode-badge v-if="tool?.cancelled">cancelled</vscode-badge>
-      <vscode-badge v-else-if="tool?.error" appearance="secondary">error</vscode-badge>
-      <vscode-badge v-else appearance="success">{{ statusText }}</vscode-badge>
-    </summary>
-    <div class="body">
-      <pre v-if="tool?.args !== undefined" class="args">{{ argText() }}</pre>
-      <div v-if="tool?.stream" class="stream">{{ tool.stream }}</div>
-      <div v-if="tool?.result !== undefined && !tool?.error" class="result">
-        <span class="label">Result</span>
-        <pre>{{ JSON.stringify(tool.result, null, 2) }}</pre>
-      </div>
-      <div v-if="tool?.error" class="result error">
-        <span class="label">Error</span>
-        <pre>{{ tool.error }}</pre>
-      </div>
+  <div class="tl-item" :class="tone">
+    <!-- timeline rail -->
+    <div class="tl-rail">
+      <span class="tl-node">
+        <span class="ac-codicon tl-icon">{{ icon }}</span>
+      </span>
     </div>
-  </details>
+
+    <!-- card -->
+    <details
+      class="tool"
+      :class="{ error: tone === 'error', cancel: tone === 'cancel' }"
+      :open="open"
+      @toggle="onToggle"
+    >
+      <summary class="head">
+        <span class="ac-codicon tl-chevron">&#xeab6;</span>
+        <span class="name">{{ tool?.name ?? 'tool' }}</span>
+        <span v-if="fileLabel" class="file" :title="fileLabel.full">{{ fileLabel.basename }}</span>
+        <span class="tl-spacer"></span>
+        <span class="tl-status" :class="tone">
+          <span v-if="tone === 'run'" class="ac-codicon spin">&#xea74;</span>
+          {{ statusText }}
+        </span>
+      </summary>
+
+      <div class="body">
+        <div v-if="tool?.args !== undefined" class="block">
+          <span class="block-label">参数</span>
+          <pre class="code">{{ argText() }}</pre>
+        </div>
+
+        <div v-if="tool?.stream" class="block">
+          <span class="block-label">输出</span>
+          <pre class="code stream">{{ tool.stream }}</pre>
+        </div>
+
+        <div v-if="diffText && !tool?.error" class="block">
+          <span class="block-label">变更</span>
+          <pre class="code diff">{{ diffText }}</pre>
+        </div>
+        <div v-else-if="tool?.result !== undefined && !tool?.error" class="block">
+          <span class="block-label">结果</span>
+          <pre class="code">{{ typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2) }}</pre>
+        </div>
+
+        <div v-if="tool?.error" class="block err">
+          <span class="block-label">错误</span>
+          <pre class="code">{{ tool.error }}</pre>
+        </div>
+      </div>
+    </details>
+  </div>
 </template>
 
 <style scoped>
+.tl-item {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.tl-rail {
+  position: relative;
+  width: 20px;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+}
+.tl-rail::before {
+  content: '';
+  position: absolute;
+  top: 18px;
+  bottom: -6px;
+  left: 50%;
+  width: 1px;
+  background: var(--border);
+}
+.tl-item:last-child .tl-rail::before {
+  display: none;
+}
+.tl-node {
+  position: relative;
+  z-index: 1;
+  margin-top: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.tl-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+.tl-item.done .tl-node { border-color: var(--success); color: var(--success); }
+.tl-item.error .tl-node { border-color: var(--error); color: var(--error); }
+.tl-item.cancel .tl-node { border-color: var(--text-muted); color: var(--text-muted); }
+.tl-item.run .tl-node { border-color: var(--accent); color: var(--accent); }
+
 .tool {
-  border-left: 3px solid var(--vscode-charts-green, #3c3);
-  margin: 3px 0;
-  background: rgba(127, 127, 127, 0.08);
-  font-size: 0.9em;
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  margin-bottom: 6px;
+  overflow: hidden;
 }
-.tool.cancelled {
-  border-color: var(--vscode-charts-red, #f55);
-}
-.tool.error {
-  border-color: var(--vscode-charts-red, #f55);
-}
+.tool.error { border-color: var(--error); }
+.tool.cancel { border-color: var(--border-strong); opacity: 0.75; }
+
 .head {
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 8px;
+  padding: 5px 10px;
   list-style: none;
   user-select: none;
+  transition: background 0.12s;
+}
+.head:hover {
+  background: var(--bg-hover);
 }
 .head::-webkit-details-marker {
   display: none;
 }
-.chevron {
-  font-size: 0.7em;
-  transition: transform 0.12s ease;
+.tl-chevron {
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: transform 0.15s;
 }
-.tool[open] > .head .chevron {
+.tool[open] > .head .tl-chevron {
   transform: rotate(90deg);
 }
 .name {
   font-weight: 600;
+  color: var(--text);
+  font-size: var(--fs-sm);
   flex-shrink: 0;
 }
 .file {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  min-width: 0;
+  max-width: 160px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 0.8em;
-  color: var(--vscode-textLink-foreground, #4af);
-  background: rgba(90, 120, 255, 0.12);
-  border: 1px solid rgba(90, 120, 255, 0.25);
-  border-radius: 4px;
-  padding: 0 6px;
+  font-size: var(--fs-xs);
+  color: var(--info);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 8px;
   cursor: default;
 }
-.body {
-  padding: 0 8px 6px;
+.tl-spacer {
+  flex: 1;
 }
-pre {
-  margin: 3px 0 0;
+.tl-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.tl-status.done { color: var(--success); }
+.tl-status.error { color: var(--error); }
+.tl-status.cancel { color: var(--text-muted); }
+.tl-status.run { color: var(--accent); }
+
+.body {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+}
+.block {
+  margin-bottom: 8px;
+}
+.block:last-child {
+  margin-bottom: 0;
+}
+.block-label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+.code {
+  margin: 0;
   white-space: pre-wrap;
-  max-height: 200px;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  max-height: 240px;
   overflow: auto;
 }
-.stream {
-  margin-top: 3px;
-  padding: 3px 6px;
-  border-radius: 4px;
-  background: rgba(127, 127, 127, 0.12);
-  white-space: pre-wrap;
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.85em;
+.code.stream {
+  background: var(--bg-secondary);
 }
-.result {
-  margin-top: 3px;
-  padding: 3px 6px;
-  border-radius: 4px;
-  background: rgba(60, 120, 90, 0.12);
+.code.diff {
+  color: var(--text);
 }
-.result.error {
-  background: rgba(200, 60, 60, 0.12);
+.block.err .code {
+  border-color: var(--error);
+  color: var(--error);
 }
-.label {
-  font-size: 0.7em;
-  text-transform: uppercase;
-  opacity: 0.6;
-  font-weight: 600;
+.spin {
+  animation: ac-spin 1s linear infinite;
+}
+@keyframes ac-spin {
+  to { transform: rotate(360deg); }
 }
 </style>

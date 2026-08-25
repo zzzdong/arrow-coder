@@ -2,7 +2,7 @@
   <div class="file-changes-panel" v-if="store.fileChanges.files.length > 0">
     <!-- Header: collapsible summary + bulk actions -->
     <div class="fc-header" @click="expanded = !expanded">
-      <span class="fc-toggle">{{ expanded ? '▼' : '▶' }}</span>
+      <span class="ac-codicon fc-toggle" :class="{ open: expanded }">&#xeab6;</span>
       <span class="fc-summary">
         {{ store.fileChanges.files.length }} 个文件
         <span v-if="store.fileChanges.checkpointCount > 0" class="fc-checkpoints">
@@ -19,7 +19,7 @@
     <!-- File list: each file has its own Save / Undo -->
     <div class="fc-body" v-show="expanded">
       <div class="fc-file" v-for="f in store.fileChanges.files" :key="f.path">
-        <span class="fc-icon">✓</span>
+        <span class="ac-codicon fc-icon">&#xea71;</span>
         <span class="fc-filename" @click="openFile(f.path)">{{ fileName(f.path) }}</span>
         <span class="fc-path" @click="openFile(f.path)">{{ f.path }}</span>
         <span class="fc-stats" :class="{ 'fc-added-only': f.removed_lines === 0 }">
@@ -138,14 +138,18 @@ function vscodeCommand(command: string, ...args: unknown[]): Promise<unknown> {
   transition: background 0.15s;
 }
 .fc-header:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
 }
 
 .fc-toggle {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   width: 14px;
   text-align: center;
+  transition: transform 0.15s;
+}
+.fc-toggle.open {
+  transform: rotate(90deg);
 }
 
 .fc-summary {
@@ -177,12 +181,12 @@ function vscodeCommand(command: string, ...args: unknown[]): Promise<unknown> {
   white-space: nowrap;
 }
 .fc-btn:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
   border-color: var(--accent);
 }
 .fc-btn-primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--text-inverse);
   border-color: var(--accent);
 }
 .fc-btn-primary:hover {
@@ -208,11 +212,11 @@ function vscodeCommand(command: string, ...args: unknown[]): Promise<unknown> {
   transition: background 0.12s;
 }
 .fc-file:hover {
-  background: var(--hover);
+  background: var(--bg-hover);
 }
 
 .fc-icon {
-  color: var(--success, #4caf50);
+  color: var(--success);
   font-size: 12px;
   flex-shrink: 0;
 }
@@ -241,11 +245,11 @@ function vscodeCommand(command: string, ...args: unknown[]): Promise<unknown> {
   display: flex;
   gap: 6px;
   font-size: 11px;
-  font-family: var(--mono, 'Cascadia Code', 'Fira Code', monospace);
+  font-family: var(--mono, 'Cascadia Code', 'Fira Code', var(--font-mono));
   flex-shrink: 0;
 }
-.fc-plus { color: var(--success, #4caf50); }
-.fc-minus { color: var(--error, #f44336); }
+.fc-plus { color: var(--success); }
+.fc-minus { color: var(--error, var(--error)); }
 
 .fc-file-actions {
   display: flex;

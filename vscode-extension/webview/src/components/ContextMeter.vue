@@ -151,7 +151,7 @@ onBeforeUnmount(() => {
 }
 .track {
   fill: none;
-  stroke: var(--vscode-progressBar-background, rgba(120, 120, 120, 0.35));
+  stroke: var(--accent);
   stroke-width: 2;
 }
 .fill {
@@ -161,13 +161,13 @@ onBeforeUnmount(() => {
   transition: stroke-dashoffset 0.25s ease;
 }
 .ctx-ok .fill {
-  stroke: var(--success, #4caf50);
+  stroke: var(--success);
 }
 .ctx-warn .fill {
-  stroke: var(--warn, #fb8c00);
+  stroke: var(--warn, var(--warn));
 }
 .ctx-high .fill {
-  stroke: var(--error, #e53935);
+  stroke: var(--error);
 }
 
 .ctx-pop {
@@ -181,11 +181,11 @@ onBeforeUnmount(() => {
   max-width: calc(100vw - 12px);
   max-height: calc(100vh - 24px);
   overflow-y: auto;
-  background: var(--bg-panel, #252526);
+  background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 10px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-popover);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -209,20 +209,20 @@ onBeforeUnmount(() => {
   height: 6px;
   border-radius: 3px;
   overflow: hidden;
-  background: var(--vscode-progressBar-background, rgba(120, 120, 120, 0.2));
+  background: var(--accent);
 }
 .ctx-seg {
   height: 100%;
   transition: width 0.25s ease;
 }
 .seg-system {
-  background: #5b8def;
+  background: var(--accent);
 }
 .seg-tools {
-  background: #b07cf0;
+  background: var(--charts-purple);
 }
 .seg-messages {
-  background: var(--accent, #4ec9b0);
+  background: var(--accent, var(--info));
 }
 .ctx-legend {
   display: flex;
@@ -260,7 +260,7 @@ onBeforeUnmount(() => {
 }
 .ctx-compact:hover:not(:disabled) {
   border-color: var(--accent);
-  background: var(--hover);
+  background: var(--bg-hover);
 }
 .ctx-compact:disabled {
   opacity: 0.5;
